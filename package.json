@@ -23,8 +23,8 @@
     "test:watch": "vitest",
     "dev": "trigger.dev dev",
     "deploy": "trigger.dev deploy",
-    "seed:kb": "tsx scripts/seed-kb.ts",
-    "sample": "tsx scripts/send-sample.ts"
+    "seed:kb": "tsx --env-file-if-exists=.env scripts/seed-kb.ts",
+    "sample": "tsx --env-file-if-exists=.env scripts/send-sample.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.39",
