@@ -59,6 +59,19 @@ export const riskInputSchema = z.object({
 
 export type RiskInput = z.infer<typeof riskInputSchema>;
 
+/**
+ * Everything knowable about a message before the agent loop runs — which is
+ * everything except what the agent itself produces. Deliberately derived from
+ * `riskInputSchema` with `.omit` rather than declared separately, so a new
+ * field can never be silently absent from the pre-agent pass.
+ */
+export const preAgentRiskInputSchema = riskInputSchema.omit({
+  proposedWrites: true,
+  hasGroundingEvidence: true,
+});
+
+export type PreAgentRiskInput = z.infer<typeof preAgentRiskInputSchema>;
+
 export interface RiskDecision {
   tier: RiskTier;
   /** The rule that fired. Logged verbatim so decisions are auditable. */
@@ -69,15 +82,25 @@ const MAX_AGENT_TURNS = 3;
 const MAX_REPLIES_24H = 5;
 const MIN_CONFIDENCE = 0.6;
 
-/**
- * Ordered rules, first match wins. Order encodes precedence: safety gates run
- * before convenience gates, and BLOCK conditions run before everything.
- */
-const RULES: ReadonlyArray<{
+interface Rule<I> {
   id: string;
   tier: RiskTier;
-  when: (i: RiskInput) => boolean;
-}> = [
+  when: (i: I) => boolean;
+}
+
+/**
+ * Rules decidable before the agent loop runs, in precedence order.
+ *
+ * Every one of these resolves to BLOCK or ESCALATE, and both of those outcomes
+ * mean "no AI-drafted reply is ever sent". So if one fires there is nothing for
+ * the agent to draft, and running the loop would burn a model call and a round
+ * of tool calls to produce output we are contractually going to throw away.
+ * Spam in particular never reaches a model.
+ *
+ * Typed against the narrow input so a rule cannot quietly start depending on
+ * agent output and break the short circuit.
+ */
+const PRE_AGENT_RULES: ReadonlyArray<Rule<PreAgentRiskInput>> = [
   {
     id: "automated_sender",
     tier: RiskTier.BLOCK,
@@ -121,6 +144,14 @@ const RULES: ReadonlyArray<{
     // If three exchanges have not resolved it, a fourth will not either.
     when: (i) => i.threadTurnCount >= MAX_AGENT_TURNS,
   },
+];
+
+/**
+ * Rules that need the agent's output, in precedence order. These run only
+ * after the loop, and every one of them resolves to APPROVE: a draft exists
+ * and a human decides whether it goes out.
+ */
+const POST_AGENT_RULES: ReadonlyArray<Rule<RiskInput>> = [
   {
     id: "low_confidence",
     tier: RiskTier.APPROVE,
@@ -146,14 +177,44 @@ const RULES: ReadonlyArray<{
   },
 ];
 
-export function assessRisk(raw: unknown): RiskDecision {
-  const input = riskInputSchema.parse(raw);
-
-  for (const rule of RULES) {
+function firstMatch<I>(
+  rules: ReadonlyArray<Rule<I>>,
+  input: I,
+): RiskDecision | null {
+  for (const rule of rules) {
     if (rule.when(input)) {
       return { tier: rule.tier, reason: rule.id };
     }
   }
+  return null;
+}
 
-  return { tier: RiskTier.AUTO, reason: "no_rule_matched" };
+/**
+ * The cheap pass, run immediately after classification.
+ *
+ * Returns a decision only when the message can be settled without a draft —
+ * always BLOCK or ESCALATE. `null` means "keep going": run the agent loop, then
+ * call {@link assessRisk} for the real decision. Never returns AUTO, because
+ * clearing the pre-agent rules is not on its own permission to send.
+ */
+export function assessPreAgentRisk(raw: unknown): RiskDecision | null {
+  return firstMatch(PRE_AGENT_RULES, preAgentRiskInputSchema.parse(raw));
+}
+
+/**
+ * The full pass, run after the agent loop. Re-checks the pre-agent rules rather
+ * than trusting that the caller ran them, so this function alone is a complete
+ * and correct decision — the short circuit is an optimisation, not a
+ * precondition.
+ */
+export function assessRisk(raw: unknown): RiskDecision {
+  const input = riskInputSchema.parse(raw);
+
+  return (
+    firstMatch(PRE_AGENT_RULES, input) ??
+    firstMatch(POST_AGENT_RULES, input) ?? {
+      tier: RiskTier.AUTO,
+      reason: "no_rule_matched",
+    }
+  );
 }
