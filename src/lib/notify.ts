@@ -37,7 +37,11 @@ export async function sendReply(email: OutboundEmail): Promise<void> {
 }
 
 export async function notifySlack(text: string): Promise<void> {
-  const payload = slackNotificationSchema.parse({ text });
+  const payload = slackNotificationSchema.parse({
+    text,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
 
   await postJson(env.SLACK_WEBHOOK_URL, payload, "notifySlack");
 }
@@ -46,15 +50,18 @@ export async function notifySlack(text: string): Promise<void> {
  * Builds an approve/reject link pair for a waitpoint token.
  *
  * A Slack incoming webhook can only render a hyperlink, and a hyperlink is a
- * GET — but completing a waitpoint is a POST. Make scenario C is the two-module
- * relay that bridges the two: it takes this GET, POSTs the decision to the
- * token's callback URL, and returns a confirmation page.
+ * GET — but completing a waitpoint is a POST. Make scenario C is the
+ * three-module relay that bridges the two: it takes this GET, POSTs the
+ * decision to the token's callback URL, and returns a confirmation page.
  *
- * The callback URL carries its own unguessable secret, so the relay needs no
- * Trigger.dev credentials. The tradeoff is that the link itself is the
- * authority: anyone who can read the Slack channel can approve. That is the
- * intended threat model for an approval channel, but it is why the channel
- * should be private.
+ * `token.url` ends in `/callback/<64-hex>`, and that suffix is the credential —
+ * the relay needs no Trigger.dev key of its own. (There is a second endpoint,
+ * `/complete`, which does want a bearer token. It is not the one we use.)
+ *
+ * The tradeoff is that the link itself is the authority: anyone who can read
+ * the Slack channel can approve. That is the intended threat model for an
+ * approval channel, but it is why the channel should be private — and why the
+ * relay must not act on the GET itself. See make/README.md scenario C.
  */
 export function approvalLinks(callbackUrl: string): {
   approve: string;
