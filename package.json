@@ -10,7 +10,10 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild",
-      "@depot/cli"
+      "@depot/cli",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp"
     ]
   },
   "scripts": {
@@ -24,7 +27,8 @@
     "sample": "tsx scripts/send-sample.ts"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^4.0.42",
+    "@ai-sdk/anthropic": "^4.0.39",
+    "@huggingface/transformers": "^4.2.0",
     "@supabase/supabase-js": "^2.112.3",
     "@trigger.dev/sdk": "^4.5.11",
     "ai": "^7.0.66",
