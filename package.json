@@ -10,7 +10,10 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild",
-      "@depot/cli"
+      "@depot/cli",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp"
     ]
   },
   "scripts": {
@@ -18,13 +21,15 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "trigger.dev dev",
-    "deploy": "trigger.dev deploy",
-    "seed:kb": "tsx scripts/seed-kb.ts",
-    "sample": "tsx scripts/send-sample.ts"
+    "dev": "trigger dev",
+    "deploy": "trigger deploy",
+    "seed:kb": "tsx --env-file-if-exists=.env scripts/seed-kb.ts",
+    "sample": "tsx --env-file-if-exists=.env scripts/send-sample.ts",
+    "approve": "tsx --env-file-if-exists=.env scripts/approve.ts"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^4.0.42",
+    "@ai-sdk/anthropic": "^4.0.39",
+    "@huggingface/transformers": "^4.2.0",
     "@supabase/supabase-js": "^2.112.3",
     "@trigger.dev/sdk": "^4.5.11",
     "ai": "^7.0.66",
@@ -36,7 +41,7 @@
     "eslint": "^10.8.1",
     "trigger.dev": "^4.5.11",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.10"
   }

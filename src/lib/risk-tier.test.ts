@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { assessRisk, RiskTier, type RiskInput } from "./risk-tier";
+import {
+  assessPreAgentRisk,
+  assessRisk,
+  RiskTier,
+  type RiskInput,
+} from "./risk-tier";
 
 /** A message that should sail straight through. Override one field per test. */
 const safe: RiskInput = {
@@ -189,6 +194,80 @@ describe("assessRisk", () => {
       expect(assessRisk(safe).reason).toBe("no_rule_matched");
       expect(assessRisk(withClass({ intent: "spam" })).reason).toBe("spam");
     });
+  });
+
+  describe("pre-agent gate", () => {
+    // Every case here decides the message without a draft, so the agent loop
+    // is skipped entirely and no model call is made after classification.
+    const shortCircuits: ReadonlyArray<[string, RiskInput]> = [
+      ["automated_sender", withInput({ isAutomatedSender: true })],
+      ["abuse", withClass({ intent: "abuse" })],
+      ["spam", withClass({ intent: "spam" })],
+      ["reply_cap_exceeded", withInput({ repliesLast24h: 5 })],
+      [
+        "unverified_sender_requesting_account_data",
+        withInput({
+          senderAuthenticated: false,
+          classification: { ...safe.classification, asksForAccountData: true },
+        }),
+      ],
+      ["model_requested_human", withClass({ needsHuman: true })],
+      ["agent_turn_limit", withInput({ threadTurnCount: 3 })],
+    ];
+
+    it.each(shortCircuits)("short-circuits on %s", (reason, input) => {
+      expect(assessPreAgentRisk(input)).toEqual({
+        tier: expect.stringMatching(/^(BLOCK|ESCALATE)$/),
+        reason,
+      });
+    });
+
+    it("never short-circuits into AUTO — clearing the gate is not permission to send", () => {
+      expect(assessPreAgentRisk(safe)).toBeNull();
+    });
+
+    // These need a draft for a human to look at, so they must fall through.
+    const mustReachTheAgent: ReadonlyArray<[string, RiskInput]> = [
+      ["low_confidence", withClass({ confidence: 0.4 })],
+      ["account_data_disclosure", withClass({ asksForAccountData: true })],
+      ["external_write", withInput({ proposedWrites: ["crm_create_deal"] })],
+      ["ungrounded_answer", withInput({ hasGroundingEvidence: false })],
+    ];
+
+    it.each(mustReachTheAgent)(
+      "falls through on %s so a draft still gets written",
+      (_reason, input) => {
+        expect(assessPreAgentRisk(input)).toBeNull();
+        expect(assessRisk(input).tier).toBe(RiskTier.APPROVE);
+      },
+    );
+
+    it("does not require agent output to be present at all", () => {
+      const { proposedWrites: _w, hasGroundingEvidence: _g, ...preAgent } =
+        withClass({ intent: "spam" });
+
+      expect(assessPreAgentRisk(preAgent)).toEqual({
+        tier: RiskTier.BLOCK,
+        reason: "spam",
+      });
+    });
+
+    it("throws on a malformed payload rather than waving the message through", () => {
+      expect(() => assessPreAgentRisk({})).toThrow();
+    });
+
+    // The guard that keeps the optimisation honest: two entry points, one
+    // answer. If a rule is ever moved across the pre/post boundary and the
+    // tiers stop agreeing, this fails.
+    it.each([...shortCircuits, ...mustReachTheAgent])(
+      "agrees with the full pass on %s",
+      (_reason, input) => {
+        const early = assessPreAgentRisk(input);
+        if (early !== null) {
+          expect(early).toEqual(assessRisk(input));
+        }
+      },
+    );
   });
 
   describe("input validation", () => {

@@ -15,43 +15,81 @@ demonstrated judgment**, not completeness.
 
 ## Current state (as of 2026-08-14)
 
-**The repo is pre-scaffold.** Four files exist: this document, `README.md`, and
-`risk-tier.ts` + `risk-tier.test.ts` **at the repo root**. There is no
-`package.json`, no `src/`, no `supabase/`, no `make/`, no CI workflow, no
-`.env.example`, and no git history (`git init` has not been run).
+The TypeScript side is built and green: `pnpm typecheck`, `pnpm lint`, and
+`pnpm test` (46 cases) all pass. What has **not** been run is anything that
+touches a live service — no migration applied, no embedding seeded, no task
+triggered, no email sent. Treat "compiles and unit-tests pass" and "works end to
+end" as different claims until the live checklist in the README has been run.
 
-Everything from the Architecture heading down is the intended design, not the
-built system. Before citing a path from this document or the README, check
-whether it exists. In particular both docs say `src/lib/risk-tier.ts`; the file
-is currently `./risk-tier.ts` and needs moving when the scaffold lands.
+`make/blueprints/` is deliberately empty. See `make/README.md`.
 
 ## Commands
 
-No `package.json` exists yet, so these are contracts the scaffold must satisfy,
-not verified commands. The README already promises them to a reviewer running a
-clean clone.
-
 ```bash
 pnpm install
-cp .env.example .env
-pnpm supabase db push                  # schema + synthetic seed
-pnpm dlx trigger.dev@latest dev        # local task runner
+cp .env.example .env                   # fill in every value
 
-pnpm tsc --noEmit                      # CI gate 1
-pnpm lint                              # CI gate 2
+# Schema: run supabase/migrations/0001_init.sql then supabase/seed.sql in the
+# Supabase SQL Editor. The CLI is deliberately not a dependency — `db push`
+# does not run seed.sql against a hosted project, so it would only be half the
+# setup while looking like all of it.
 
-pnpm vitest run                        # full suite (risk-tier only)
-pnpm vitest run src/lib/risk-tier.test.ts
-pnpm vitest run -t "blocks spam"       # single test by name
+pnpm seed:kb                           # embeds kb_chunks locally, no API cost
+pnpm dev                               # trigger.dev dev (tasks run on your machine)
 
-# Drive the task without Make in the loop
-pnpm tsx scripts/send-sample.ts --fixture spam
-pnpm tsx scripts/send-sample.ts --fixture account-question
-pnpm tsx scripts/send-sample.ts --fixture general-question
+pnpm typecheck                         # tsc --noEmit
+pnpm lint                              # eslint
+pnpm test                              # vitest run
+
+pnpm vitest run src/lib/risk-tier.test.ts   # the only suite
+pnpm vitest run -t "blocks spam"            # a single test by name
+
+# Drive the task with Make out of the loop — this is the demo path
+pnpm sample --fixture spam
+pnpm sample --fixture account-question
+pnpm sample --fixture general-question
+pnpm sample --fixture spam --fresh     # new Message-ID, replays past idempotency
 ```
 
-The `--fixture` script is the demo path and the only way to exercise the system
-end to end without a Make account. Keep it working.
+`pnpm sample` is the only way to exercise the system end to end without a Make
+account, and it is what the Loom records. Keep it working.
+
+## Providers and cost
+
+- **Anthropic** (`@ai-sdk/anthropic`) for classification and the reply loop.
+  The only paid API in the stack. The model is named in exactly one place,
+  `src/agent/model.ts` — swapping model or effort is a one-line change there
+  and nowhere else.
+- **Local embeddings** via `@huggingface/transformers`, all-MiniLM-L6-v2, 384
+  dims, in-process. No API key, no cost, no network at query time.
+- **Trigger.dev's free credit covers compute, not model calls.** Runs parked on
+  `wait.forToken` are suspended and burn none of it.
+
+The pinned model is `claude-haiku-4-5` — the cheapest available — chosen to keep
+the cost of iterating on the demo near zero. It is not the intended production
+choice; Sonnet 5 is.
+
+Thinking is left unconfigured on purpose. On Haiku 4.5 that means no thinking,
+which is the intended trade at this price point. Note that Haiku 4.5 **rejects
+`effort` with a 400** rather than ignoring it, so `CLASSIFY_OPTIONS` and
+`REPLY_OPTIONS` are both empty today. Moving back up to Sonnet 5 or Opus 5 means
+restoring `effort` and the model id together — one edit, one file.
+
+## Environment variables
+
+`.env.example` is the source of truth and lists every one with a placeholder.
+
+| Variable | Used by |
+| --- | --- |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | all table access; RLS is on with no policies, so the service role is the only way in |
+| `ANTHROPIC_API_KEY` | classify + reply agent |
+| `MAKE_OUTBOUND_WEBHOOK_URL` | POST target for Make scenario B |
+| `APPROVAL_RELAY_BASE_URL` | Make scenario C, the GET→POST approval relay |
+| `SLACK_WEBHOOK_URL` | approval requests and escalation notices |
+| `TRIGGER_SECRET_KEY`, `TRIGGER_PROJECT_REF` | CLI, `trigger.config.ts`, `pnpm sample` |
+
+`src/env.ts` parses these with zod at import time, so a missing value fails at
+boot rather than halfway through handling a customer email.
 
 ## Hard constraints (do not negotiate these away)
 
@@ -138,7 +176,7 @@ callback URL.
 - `threads` - id, thread_key, contact_id, status, turn_count, last_message_at
 - `messages` - id, thread_id, message_id (unique), direction, subject, body,
   classification jsonb, risk_tier, created_at
-- `kb_chunks` - id, source, content, embedding vector(1536)
+- `kb_chunks` - id, source, content, embedding vector(384)
 
 `messages.message_id` unique is the database-level idempotency backstop. The
 Trigger.dev `idempotencyKey` is the first line of defense.
@@ -150,10 +188,22 @@ safety-critical decision in the system and the only module with real unit test
 coverage. Rules are ordered; first match wins. See the file for the canonical
 list. Do not scatter risk logic into the task file.
 
+The rule list is split in two. `PRE_AGENT_RULES` holds everything decidable
+straight after classification — every BLOCK and ESCALATE rule, because both
+tiers mean no AI-drafted reply is ever sent, so there is nothing for the agent
+to write. `POST_AGENT_RULES` holds the four APPROVE rules, which need the
+agent's output. `assessPreAgentRisk` runs the first band and returns `null` for
+"keep going"; `assessRisk` runs both and is a complete decision on its own, so
+the short circuit is an optimisation and never a precondition.
+
+The practical effect: spam and escalations never reach a model call.
+
 Invariants the test suite enforces, worth knowing before editing the rule array:
 
 - Precedence is BLOCK > ESCALATE > APPROVE > AUTO, and reordering rules across
   those bands changes behavior silently. Tests pin the boundaries.
+- A drift-guard test asserts the two entry points never disagree on a tier.
+  Moving a rule across the pre/post boundary fails it.
 - Account-data requests from an unauthenticated or unresolved sender
   **ESCALATE, they do not APPROVE**. A human shown a plausible draft will click
   yes, so a spoofable sender must never reach the approval queue.
@@ -191,3 +241,9 @@ If a feature does not appear in that list, it is not required.
 Do not add: a dashboard, a settings UI, an admin panel, retry queues beyond what
 Trigger.dev gives for free, an ORM abstraction layer, or a plugin system. Every
 one of these makes the six-minute review worse.
+
+<!-- TRIGGER.DEV SKILLS START -->
+## Trigger.dev agent skills
+
+This project has Trigger.dev agent skills installed in `.claude/skills/`. Before writing or changing Trigger.dev code (background tasks, scheduled tasks, realtime, or chat.agent AI agents), load the most relevant skill: `trigger-authoring-tasks`, `trigger-authoring-chat-agent`.
+<!-- TRIGGER.DEV SKILLS END -->

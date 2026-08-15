@@ -1,0 +1,18 @@
+{
+  "messageId": "<demo-spam-0001@bulk-sender.invalid>",
+  "threadKey": "demo-spam-0001",
+  "from": {
+    "email": "growth@bulk-sender.invalid",
+    "name": "Growth Partners"
+  },
+  "to": ["sales@mailroom.test"],
+  "subject": "Boost your SEO rankings in 30 days — guaranteed",
+  "text": "Hi there,\n\nI came across your website and noticed you're missing out on thousands of monthly visitors. Our proven SEO framework has helped 500+ SaaS companies triple their organic traffic.\n\nInterested in a free audit? Just reply YES and I'll send it over.\n\nBest regards,\nGrowth Partners",
+  "headers": {
+    "precedence": "bulk",
+    "listUnsubscribe": "<mailto:unsubscribe@bulk-sender.invalid>"
+  },
+  "spfPass": false,
+  "dkimPass": false,
+  "receivedAt": "2026-08-14T09:30:00.000Z"
+}
