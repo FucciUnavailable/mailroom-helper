@@ -6,7 +6,7 @@
             "module": "gateway:CustomWebHook",
             "version": 1,
             "parameters": {
-                "hook": 2696490,
+                "hook": null,
                 "maxResults": 1
             },
             "mapper": {},

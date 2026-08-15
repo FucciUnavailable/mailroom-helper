@@ -4,11 +4,16 @@ Three scenarios, eleven modules total. Make is the I/O shell: it owns mailbox
 auth, sending, and the HTTP plumbing that is genuinely tedious to hand-roll.
 Every decision lives in `src/`.
 
-> **There are no blueprints committed yet.** Exports embed connection IDs,
-> webhook URLs, and header values, and a hand-written export with guessed
-> module identifiers will not import cleanly — a broken import is worse than
-> none. Build the three scenarios below, export each one, run the scrub
-> checklist at the bottom, and commit the results to `make/blueprints/`.
+> **Scenario C is committed; A and B are not yet.** See
+> `make/blueprints/scenario-c-approval-relay.json` — a real export, scrubbed
+> per the checklist at the bottom, with its `hook` id nulled so importing
+> prompts you to attach your own webhook.
+>
+> A and B stay unexported for now because they carry mailbox and CRM
+> connections, and exports embed connection ids, webhook URLs, and header
+> values. A hand-written export with guessed module identifiers will not
+> import cleanly — a broken import is worse than none. Build them from the
+> tables below, export, scrub, commit.
 
 ## Scenario A — inbound (5 modules)
 

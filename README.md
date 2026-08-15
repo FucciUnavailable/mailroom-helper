@@ -76,7 +76,7 @@ Stated up front so you don't have to go find out.
 | CRM                          | Mocked    | Supabase `contacts` table. Swapping to HubSpot is one file: `src/tools/crm.ts` |
 | Meeting scheduling           | Mocked    | Returns a static booking link. No calendar writes.                             |
 | Lead enrichment              | Not built | Out of scope                                                                   |
-| Make blueprints              | Not built | `make/README.md` specifies all eleven modules; exports are account-specific       |
+| Make blueprints              | Partial   | Scenario C is committed and importable; A and B are specified in `make/README.md` but not exported |
 
 Seed data is synthetic throughout, on the RFC 2606 reserved `.test` and
 `.invalid` TLDs — a misconfigured demo cannot email a real person.
