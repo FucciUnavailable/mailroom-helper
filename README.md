@@ -81,10 +81,16 @@ Stated up front so you don't have to go find out.
 Seed data is synthetic throughout, on the RFC 2606 reserved `.test` and
 `.invalid` TLDs — a misconfigured demo cannot email a real person.
 
-**Providers.** Claude (`claude-opus-5`) does classification and the reply loop,
-and is the only paid API here. Embeddings run locally through transformers.js
-(all-MiniLM-L6-v2, 384 dims) — no key, no cost, no network at query time. The
-model is named in exactly one file, `src/agent/model.ts`.
+**Providers.** Claude does classification and the reply loop, and is the only
+paid API here. Embeddings run locally through transformers.js (all-MiniLM-L6-v2,
+384 dims) — no key, no cost, no network at query time. The model is named in
+exactly one file, `src/agent/model.ts`.
+
+That file currently pins `claude-haiku-4-5`, the cheapest model in the lineup,
+so that iterating on the demo costs approximately nothing. Haiku 4.5 rejects the
+`effort` parameter outright, so both provider-options objects are empty; moving
+up to Sonnet 5 or Opus 5 means restoring `effort` in the same edit. The comment
+in that file says so, because the two changes have to travel together.
 
 ## Design decisions
 

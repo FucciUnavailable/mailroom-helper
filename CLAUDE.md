@@ -65,8 +65,15 @@ account, and it is what the Loom records. Keep it working.
 - **Trigger.dev's free credit covers compute, not model calls.** Runs parked on
   `wait.forToken` are suspended and burn none of it.
 
-Thinking is left unconfigured on purpose: it is on by default on Opus 5, and
-`effort` is the dial to reach for instead of turning it off.
+The pinned model is `claude-haiku-4-5` — the cheapest available — chosen to keep
+the cost of iterating on the demo near zero. It is not the intended production
+choice; Sonnet 5 is.
+
+Thinking is left unconfigured on purpose. On Haiku 4.5 that means no thinking,
+which is the intended trade at this price point. Note that Haiku 4.5 **rejects
+`effort` with a 400** rather than ignoring it, so `CLASSIFY_OPTIONS` and
+`REPLY_OPTIONS` are both empty today. Moving back up to Sonnet 5 or Opus 5 means
+restoring `effort` and the model id together — one edit, one file.
 
 ## Environment variables
 
