@@ -4,10 +4,11 @@ Three scenarios, ten modules total. Make is the I/O shell: it owns mailbox
 auth, sending, and the HTTP plumbing that is genuinely tedious to hand-roll.
 Every decision lives in `src/`.
 
-> **`blueprints/` is empty in this repo.** Blueprint exports embed connection
-> IDs, webhook URLs, and header values, and a hand-written export with guessed
-> module identifiers will not import. Build the three scenarios below, export
-> each one, run the scrub checklist, and commit the results.
+> **There are no blueprints committed yet.** Exports embed connection IDs,
+> webhook URLs, and header values, and a hand-written export with guessed
+> module identifiers will not import cleanly — a broken import is worse than
+> none. Build the three scenarios below, export each one, run the scrub
+> checklist at the bottom, and commit the results to `make/blueprints/`.
 
 ## Scenario A — inbound (5 modules)
 
