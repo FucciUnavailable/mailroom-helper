@@ -257,6 +257,14 @@ async function waitForApproval(
 
   const links = approvalLinks(token.url);
 
+  // The token id (not the callback secret) goes in the run timeline, so an
+  // approval can be correlated with its run — and so `pnpm approve --token`
+  // can drive this branch before Make scenario C exists.
+  logger.info("parked on approval waitpoint", {
+    tokenId: token.id,
+    rule: decision.reason,
+  });
+
   await notifySlack(
     [
       `:eyes: *Approval needed*`,
