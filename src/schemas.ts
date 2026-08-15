@@ -84,8 +84,21 @@ export type OutboundEmail = z.infer<typeof outboundEmailSchema>;
 // Outbound: Trigger.dev -> Slack incoming webhook
 // ---------------------------------------------------------------------------
 
+/**
+ * `unfurl_links` is not cosmetic here. Slack fetches every URL in a message to
+ * build its preview, and the approval message contains an approve link and a
+ * reject link — so the unfurler clicked both, in the same second, before any
+ * human saw the message. Whichever landed first burned the waitpoint.
+ *
+ * Turning unfurling off stops Slack specifically. It does not make the links
+ * safe: they are still GETs that change state, so any URL scanner sitting in
+ * front of a mailbox or browser can do the same thing. The durable fix is a
+ * confirmation step in the relay, see make/README.md scenario C.
+ */
 export const slackNotificationSchema = z.object({
   text: z.string().min(1),
+  unfurl_links: z.literal(false),
+  unfurl_media: z.literal(false),
 });
 
 export type SlackNotification = z.infer<typeof slackNotificationSchema>;
