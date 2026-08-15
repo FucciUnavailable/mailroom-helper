@@ -1,0 +1,15 @@
+{
+  "messageId": "<demo-general-0001@example-corp.test>",
+  "threadKey": "demo-general-0001",
+  "from": {
+    "email": "ada.byron@example-corp.test",
+    "name": "Ada Byron"
+  },
+  "to": ["sales@mailroom.test"],
+  "subject": "Question about your plans",
+  "text": "Hi,\n\nWe're comparing tools for our support team and I had two questions.\n\nWhat's the difference between your Team and Enterprise plans, and do you support SAML single sign-on?\n\nThanks,\nAda",
+  "headers": {},
+  "spfPass": true,
+  "dkimPass": true,
+  "receivedAt": "2026-08-14T09:12:00.000Z"
+}

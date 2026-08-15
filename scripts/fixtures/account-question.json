@@ -1,0 +1,15 @@
+{
+  "messageId": "<demo-account-0001@example-corp.test>",
+  "threadKey": "demo-account-0001",
+  "from": {
+    "email": "ada.byron@example-corp.test",
+    "name": "Ada Byron"
+  },
+  "to": ["sales@mailroom.test"],
+  "subject": "Our current plan and renewal date",
+  "text": "Hello,\n\nCan you confirm which plan our account is on and when it renews? I also want to check how many seats we're currently paying for.\n\nBest,\nAda",
+  "headers": {},
+  "spfPass": true,
+  "dkimPass": true,
+  "receivedAt": "2026-08-14T09:20:00.000Z"
+}
