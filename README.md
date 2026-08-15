@@ -45,7 +45,7 @@ flowchart TD
     L --> N[Reply delivered]
 ```
 
-The Make side is 10 modules across three scenarios. Everything that would have
+The Make side is 11 modules across three scenarios. Everything that would have
 become an unreadable router tree is a function instead.
 
 Two things in that diagram are worth pausing on.
@@ -76,7 +76,7 @@ Stated up front so you don't have to go find out.
 | CRM                          | Mocked    | Supabase `contacts` table. Swapping to HubSpot is one file: `src/tools/crm.ts` |
 | Meeting scheduling           | Mocked    | Returns a static booking link. No calendar writes.                             |
 | Lead enrichment              | Not built | Out of scope                                                                   |
-| Make blueprints              | Not built | `make/README.md` specifies all ten modules; exports are account-specific       |
+| Make blueprints              | Not built | `make/README.md` specifies all eleven modules; exports are account-specific       |
 
 Seed data is synthetic throughout, on the RFC 2606 reserved `.test` and
 `.invalid` TLDs — a misconfigured demo cannot email a real person.
