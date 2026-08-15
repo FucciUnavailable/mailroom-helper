@@ -234,3 +234,9 @@ If a feature does not appear in that list, it is not required.
 Do not add: a dashboard, a settings UI, an admin panel, retry queues beyond what
 Trigger.dev gives for free, an ORM abstraction layer, or a plugin system. Every
 one of these makes the six-minute review worse.
+
+<!-- TRIGGER.DEV SKILLS START -->
+## Trigger.dev agent skills
+
+This project has Trigger.dev agent skills installed in `.claude/skills/`. Before writing or changing Trigger.dev code (background tasks, scheduled tasks, realtime, or chat.agent AI agents), load the most relevant skill: `trigger-authoring-tasks`, `trigger-authoring-chat-agent`.
+<!-- TRIGGER.DEV SKILLS END -->
