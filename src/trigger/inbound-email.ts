@@ -24,7 +24,15 @@ import {
   type InboundEmailPayload,
 } from "../schemas";
 
-/** What Make scenario C posts to the waitpoint callback when a link is clicked. */
+/**
+ * What Make scenario C posts to the waitpoint callback when a link is clicked.
+ *
+ * `token.url` is the `/callback/<secret>` endpoint, whose raw body becomes the
+ * run's output verbatim — so the relay posts this shape unwrapped. The SDK's
+ * `wait.completeToken` targets a different endpoint that wraps the same shape
+ * in `{"data": ...}`, which is why `pnpm approve` and Make send different
+ * bytes to mean the same thing.
+ */
 const approvalDecisionSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });
@@ -298,8 +306,15 @@ async function waitForApproval(
 
   if (!parsed.success) {
     // Fail closed: an unrecognised callback payload is not an approval.
+    //
+    // The raw output is logged alongside the issues because zod's issue objects
+    // keep `input` non-enumerable — it vanishes through JSON.stringify, so the
+    // issue list alone reads identically whether the relay sent `{}`, an empty
+    // string, an unrendered `{{decision}}`, or a `{"data":{…}}` wrapper.
     logger.error("malformed approval payload, treating as reject", {
       issues: parsed.error.issues,
+      rawOutput: result.output,
+      rawOutputType: typeof result.output,
     });
     await advanceThread(threadId, "escalated", false, turnCount);
     return { outcome: "approval_malformed" as const, reason: decision.reason };
