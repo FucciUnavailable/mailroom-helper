@@ -126,9 +126,15 @@ decision, not two — changing either means changing both and re-seeding.
 ```bash
 pnpm install
 cp .env.example .env          # fill in the values listed there
-pnpm supabase db push         # schema + synthetic seed
+```
+
+Create the schema by running two files in the Supabase SQL Editor, in order:
+`supabase/migrations/0001_init.sql`, then `supabase/seed.sql`. Two copy-pastes,
+no CLI login and no project linking — worth it to keep setup under a minute.
+
+```bash
 pnpm seed:kb                  # embeds the knowledge base locally, free
-pnpm dev                      # trigger.dev dev
+pnpm dev                      # trigger.dev dev — tasks run on your machine
 ```
 
 Then drive the task directly, with Make out of the loop:

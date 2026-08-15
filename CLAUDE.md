@@ -29,9 +29,13 @@ end" as different claims until the live checklist in the README has been run.
 pnpm install
 cp .env.example .env                   # fill in every value
 
-pnpm supabase db push                  # schema + synthetic seed
+# Schema: run supabase/migrations/0001_init.sql then supabase/seed.sql in the
+# Supabase SQL Editor. The CLI is deliberately not a dependency — `db push`
+# does not run seed.sql against a hosted project, so it would only be half the
+# setup while looking like all of it.
+
 pnpm seed:kb                           # embeds kb_chunks locally, no API cost
-pnpm dev                               # trigger.dev dev (runs tasks locally)
+pnpm dev                               # trigger.dev dev (tasks run on your machine)
 
 pnpm typecheck                         # tsc --noEmit
 pnpm lint                              # eslint
