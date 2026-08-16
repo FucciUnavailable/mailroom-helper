@@ -14,8 +14,15 @@ and deliberately stays silent on spam.
 ## The architecture bet
 
 Make is excellent at connectors and poor at branching logic. Trigger.dev is the
-inverse. So the mailbox, OAuth, and sending stay in Make, and every decision
-lives in typed TypeScript that can be tested and version controlled.
+inverse. So mailbox polling and OAuth stay in Make, and every decision lives in
+typed TypeScript that can be tested and version controlled.
+
+The split is drawn per-connector, not per-direction. Watching a shared inbox
+earns a connector platform: OAuth, polling, header extraction, all of it
+tedious and none of it interesting. Sending is one authenticated POST to
+Resend, so it stays in TypeScript where it can be typed, retried, and made
+idempotent. "Use the connector platform for the connectors that are actually
+hard" is a more useful rule than "all I/O goes in Make".
 
 ```mermaid
 flowchart TD
@@ -33,19 +40,19 @@ flowchart TD
 
     G --> H{"risk-tier.ts<br/>full pass"}
     H -->|APPROVE| K["wait.forToken timeout 1d"]
-    H -->|AUTO| L["Make scenario B<br/>Send email · log activity"]
+    H -->|AUTO| L["Resend<br/>send · record outbound"]
 
     K -->|Slack link| R["Make scenario C<br/>GET → POST relay"]
     R -->|approved| L
     R -->|rejected| J
     K -->|timeout| J
 
-    G <--> M[(Supabase<br/>contacts · threads<br/>messages · pgvector)]
+    G <--> M[(Supabase<br/>contacts · threads<br/>messages · kb_chunks)]
 
     L --> N[Reply delivered]
 ```
 
-The Make side is 11 modules across three scenarios. Everything that would have
+The Make side is 8 modules across two scenarios. Everything that would have
 become an unreadable router tree is a function instead.
 
 Two things in that diagram are worth pausing on.
@@ -70,21 +77,22 @@ Stated up front so you don't have to go find out.
 | ---------------------------- | --------- | ------------------------------------------------------------------------------ |
 | Inbound to reply, end to end | **Real**  | Works from a clean clone via `pnpm sample`                                      |
 | Classification               | **Real**  | Claude structured output, zod-validated                                        |
-| Knowledge base retrieval     | **Real**  | pgvector cosine search, embeddings computed locally                            |
+| Knowledge base retrieval     | **Real**  | Postgres full-text search, ranked, with a grounding floor. Lexical, not semantic — see below |
+| Sending                      | **Real**  | Resend, threaded via In-Reply-To, idempotent on the inbound Message-ID          |
 | Approval gate                | **Real**  | Trigger.dev waitpoint, live approve/reject links                               |
-| Idempotency + loop guards    | **Real**  | Message-ID keyed, enforced twice; header-based guards                          |
+| Idempotency + loop guards    | **Real**  | Message-ID keyed, enforced three times; header-based guards                    |
 | CRM                          | Mocked    | Supabase `contacts` table. Swapping to HubSpot is one file: `src/tools/crm.ts` |
 | Meeting scheduling           | Mocked    | Returns a static booking link. No calendar writes.                             |
 | Lead enrichment              | Not built | Out of scope                                                                   |
-| Make blueprints              | Partial   | Scenario C is committed and importable; A and B are specified in `make/README.md` but not exported |
+| Make blueprints              | Partial   | Scenario C is committed and importable; A is specified in `make/README.md` but not exported |
 
 Seed data is synthetic throughout, on the RFC 2606 reserved `.test` and
 `.invalid` TLDs — a misconfigured demo cannot email a real person.
 
 **Providers.** Claude does classification and the reply loop, and is the only
-paid API here. Embeddings run locally through transformers.js (all-MiniLM-L6-v2,
-384 dims) — no key, no cost, no network at query time. The model is named in
-exactly one file, `src/agent/model.ts`.
+metered API here. Resend sends, on a free tier that comfortably covers a demo.
+Retrieval is Postgres, so it costs nothing and adds no provider. The model is
+named in exactly one file, `src/agent/model.ts`.
 
 That file currently pins `claude-haiku-4-5`, the cheapest model in the lineup,
 so that iterating on the demo costs approximately nothing. Haiku 4.5 rejects the
@@ -104,9 +112,17 @@ act is most of the work in an autonomous email agent.
 is hit. The alternative is a `pending` row plus a polling cron, which is more
 code, has no timeout semantics, and loses the run context.
 
-**Idempotency is keyed on the RFC 5322 Message-ID**, enforced twice: as the
-Trigger.dev `idempotencyKey` and as a unique constraint on `messages.message_id`.
-Mail triggers re-fire. Double-replying to a customer is unrecoverable.
+**Idempotency is keyed on the RFC 5322 Message-ID**, enforced three times: as
+the Trigger.dev `idempotencyKey`, as a unique constraint on
+`messages.message_id`, and as the `Idempotency-Key` on the Resend send. Mail
+triggers re-fire. Double-replying to a customer is unrecoverable.
+
+The third layer is not belt-and-braces, it covers a window the other two miss.
+A send that succeeds at Resend but fails before the outbound row is written
+gets retried by Trigger.dev, and the outbound row is keyed on a fresh UUID, so
+nothing downstream would notice the duplicate. The inbound Message-ID is stable
+across every attempt of the run, so Resend returns the original send instead of
+delivering a second copy.
 
 **Risk tiering is one pure function**, `src/lib/risk-tier.ts`, and it's the only
 module with real test coverage. That's deliberate. It's the only place in the
@@ -121,11 +137,33 @@ tool contracts, not just the prompt: every tool returns an explicit
 so "we don't have that" is a value the model receives and can report — and the
 same boolean feeds the risk rule that gates ungrounded answers.
 
-**Embeddings run locally.** all-MiniLM-L6-v2 through transformers.js, in
-process, 384 dims. A knowledge base of a few dozen chunks does not need a
-hosted embedding API, and this removes a key, a bill, and a network hop from
-the hot path. The chosen model and the `vector(384)` column width are one
-decision, not two — changing either means changing both and re-seeding.
+**Retrieval is full-text search, and that is a downgrade I chose.** This
+started as pgvector with all-MiniLM-L6-v2 embedded locally, which was lovely
+until it had to run in a deployed container: ~90MB of model weights pulled at
+every cold start, `onnxruntime-node` externalised out of the bundle because
+esbuild has no loader for prebuilt `.node` binaries, against a 120-second run
+ceiling. For eight knowledge base chunks, that is a lot of machinery bought
+with the first impression of a live demo.
+
+So `search_kb_chunks` is `ts_rank` over a generated `tsvector` column. The
+query is normalised into lexemes and OR-ed rather than passed through
+`plainto_tsquery`, which ANDs — ANDing means a question the knowledge base does
+answer returns nothing the moment the agent phrases it with one word we never
+wrote down.
+
+What survives is the part that mattered: the grounding floor. A rank below it
+returns zero rows, `hasGroundingEvidence` goes false, and the reply is gated
+rather than invented — exactly as the cosine floor did. `src/tools/kb-search.ts`
+is the entire seam, so restoring pgvector is one function and no caller
+changes.
+
+**Sender authentication is parsed in TypeScript, not in Make.** No mailbox
+module exposes SPF and DKIM as booleans; they live inside the
+`Authentication-Results` header. Make forwards the raw string and
+`src/lib/auth-results.ts` decides, because a regex that gates account-data
+disclosure belongs somewhere it can be read and tested. A missing header reads
+as *not authenticated* — for a signal whose only job is to gate account data,
+unknown has to mean no.
 
 ## Running it locally
 
@@ -138,8 +176,10 @@ Create the schema by running two files in the Supabase SQL Editor, in order:
 `supabase/migrations/0001_init.sql`, then `supabase/seed.sql`. Two copy-pastes,
 no CLI login and no project linking — worth it to keep setup under a minute.
 
+There is no indexing step. `kb_chunks.content_tsv` is a generated column, so
+the knowledge base is searchable the moment `seed.sql` finishes.
+
 ```bash
-pnpm seed:kb                  # embeds the knowledge base locally, free
 pnpm dev                      # trigger.dev dev — tasks run on your machine
 ```
 
@@ -158,15 +198,41 @@ Offline checks need no credentials at all:
 pnpm typecheck && pnpm lint && pnpm test
 ```
 
-To run it through Make, build the three scenarios from `make/README.md`.
+### Running it from a real mailbox
+
+Build the two scenarios in `make/README.md`, then decide which Trigger.dev
+environment the inbound webhook points at. The secret key in scenario A's
+`Authorization` header is what chooses.
+
+A `tr_dev_…` key routes runs to your **dev** environment, which only executes
+while `pnpm dev` is running on your machine. That is fine for wiring things up
+and wrong for anything you intend to leave running: the approval branch parks
+on `wait.forToken({ timeout: "1d" })`, and a parked dev run cannot resume once
+the terminal is gone.
+
+```bash
+pnpm deploy                   # trigger deploy
+```
+
+Then put a `tr_prod_…` key in Make. Deployed runs do not read `.env` — set
+every variable from `.env.example` in the Trigger.dev dashboard for the prod
+environment, or the task fails at boot on the first message, which is by design
+(`src/env.ts` parses at import time).
 
 ### What a green checkmark does and doesn't tell you
 
 CI runs `tsc --noEmit`, `eslint`, and the risk-tier suite. That is a real
 signal about the decision logic and the type-level contracts, and it says
-nothing about whether Supabase, Anthropic, Slack, or Make are wired up
+nothing about whether Supabase, Anthropic, Resend, Slack, or Make are wired up
 correctly — none of those are touched without credentials. The three `pnpm
 sample` runs above are what actually proves the path end to end.
+
+One number in particular is unverified until you run it: the `RANK_FLOOR` in
+`src/tools/kb-search.ts` was reasoned about from how `ts_rank` scales with
+matched lexemes, not measured against a live database. Check that
+`general-question` retrieves the pricing and SSO chunks and that an
+out-of-scope question (on-prem deployment, HIPAA) retrieves nothing, and adjust
+the one constant if not.
 
 ## Layout
 
@@ -179,14 +245,14 @@ src/
   tools/                     kb-search, crm, booking — zod in and out
   lib/risk-tier.ts           the safety-critical decision
   lib/risk-tier.test.ts      the only real test suite
-  lib/embeddings.ts          local MiniLM, 384 dims
+  lib/auth-results.ts        SPF/DKIM out of Authentication-Results
   lib/db.ts, notify.ts       everything with I/O, kept out of the spine
   schemas.ts                 zod contracts for every boundary
   env.ts                     parsed at import; missing vars fail at boot
-make/README.md               the ten Make modules, spec'd
-supabase/migrations/         schema + match_kb_chunks
+make/README.md               the eight Make modules, spec'd
+supabase/migrations/         schema + search_kb_chunks
 supabase/seed.sql            synthetic contacts and KB text
-scripts/                     seed-kb, send-sample, fixtures
+scripts/                     send-sample, fixtures
 ```
 
 ## What I'd do next
@@ -195,8 +261,13 @@ scripts/                     seed-kb, send-sample, fixtures
   seam)
 - Real scheduling: freebusy query, propose slots, book only after the recipient
   picks one
-- Sender verification (SPF/DKIM pass + exact contact match) as a hard gate
-  before any reply containing account data, rather than routing it to approval
+- Sender verification as a hard gate before any reply containing account data,
+  rather than routing it to approval. The SPF/DKIM half exists
+  (`src/lib/auth-results.ts`); pairing it with an exact contact match and
+  refusing outright is the change
+- Restore pgvector for retrieval once cold starts are worth solving — a
+  prebuilt image with the weights baked in, or a hosted embedding call. The
+  tool contract already accommodates it
 - Per-thread reply rate limiting, and hard escalation after 3 agent turns with
   no resolution
 - Evaluation harness over a fixture set, scoring classification accuracy and

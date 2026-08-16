@@ -1,19 +1,28 @@
 # Make scenarios
 
-Three scenarios, eleven modules total. Make is the I/O shell: it owns mailbox
-auth, sending, and the HTTP plumbing that is genuinely tedious to hand-roll.
-Every decision lives in `src/`.
+Two scenarios, eight modules total. Make is the I/O shell: it owns mailbox auth
+and the HTTP plumbing that is genuinely tedious to hand-roll. Every decision
+lives in `src/`.
 
-> **Scenario C is committed; A and B are not yet.** See
+**There is no outbound scenario.** Sending used to be a third scenario and is
+now a direct Resend call in `src/lib/notify.ts`. Mailbox ingestion earns a
+connector platform — OAuth against a shared inbox, polling, header extraction.
+Sending is one authenticated POST, and putting it behind a webhook would have
+bought an extra network hop, an untyped payload, and a scenario to keep alive.
+The asymmetry is deliberate: Make where connectors are hard, TypeScript where
+they are not. It also happens to fit the free tier's two-scenario limit, which
+is a nice coincidence and not the reason.
+
+> **Scenario C is committed; A is not yet.** See
 > `make/blueprints/scenario-c-approval-relay.json` — a real export, scrubbed
 > per the checklist at the bottom, with its `hook` id nulled so importing
 > prompts you to attach your own webhook.
 >
-> A and B stay unexported for now because they carry mailbox and CRM
-> connections, and exports embed connection ids, webhook URLs, and header
-> values. A hand-written export with guessed module identifiers will not
-> import cleanly — a broken import is worse than none. Build them from the
-> tables below, export, scrub, commit.
+> A stays unexported for now because it carries a mailbox connection, and
+> exports embed connection ids, webhook URLs, and header values. A hand-written
+> export with guessed module identifiers will not import cleanly — a broken
+> import is worse than none. Build it from the table below, export, scrub,
+> commit.
 
 ## Scenario A — inbound (5 modules)
 
@@ -22,7 +31,7 @@ Watches the shared mailbox and hands each message to Trigger.dev.
 | # | Module | Notes |
 |---|---|---|
 | 1 | **Email › Watch emails** (or Gmail / Microsoft 365) | Poll the shared sales inbox. Mark as read on fetch so a slow run cannot double-deliver. |
-| 2 | **Tools › Set multiple variables** | Derive `threadKey`: take the first Message-ID in `References`, else normalise the subject (strip `Re:`/`Fwd:`, lowercase, trim) and append the sender address. |
+| 2 | **Tools › Set multiple variables** | Derive `threadKey`: take the first Message-ID in `References`, else normalise the subject (strip `Re:`/`Fwd:`, lowercase, trim) and append the sender address. Also pull the raw `Authentication-Results` header out of the headers collection — see below. |
 | 3 | **Flow control › Filter** | The loop guard. Drop the message when the sender equals the inbox address. Header-based guards are *not* filtered here — they are forwarded and decided in `risk-tier.ts`, so a blocked auto-responder still gets logged. |
 | 4 | **Tools › Compose a string** | Build the JSON body. Shape below. |
 | 5 | **HTTP › Make a request** | `POST https://api.trigger.dev/api/v1/tasks/inbound-email/trigger`<br>Headers: `Authorization: Bearer {{TRIGGER_SECRET_KEY}}`, `Content-Type: application/json`<br>Body: `{"payload": <the object below>, "options": {"idempotencyKey": "{{Message-ID}}"}}` |
@@ -58,8 +67,7 @@ is the contract, and the task rejects anything that does not match.
     "listUnsubscribe": "value of List-Unsubscribe, omit if absent",
     "listId": "value of List-Id, omit if absent"
   },
-  "spfPass": true,
-  "dkimPass": true,
+  "authenticationResults": "mx.google.com; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=sender@example.com; dmarc=pass",
   "receivedAt": "2026-08-14T09:12:00.000Z"
 }
 ```
@@ -67,13 +75,31 @@ is the contract, and the task rejects anything that does not match.
 Omit the header keys that are absent rather than sending empty strings — the
 risk rule treats presence as the signal.
 
-## Scenario B — outbound (3 modules)
+### SPF and DKIM: forward the header, don't parse it here
 
-| # | Module | Notes |
-|---|---|---|
-| 1 | **Webhooks › Custom webhook** | Receives `outboundEmailSchema`. Set this URL as `MAKE_OUTBOUND_WEBHOOK_URL`. |
-| 2 | **Email › Send an email** | To `to`, subject `subject`, body `body`, and set the `In-Reply-To` header to `inReplyTo` so the reply threads properly. |
-| 3 | **HTTP › Make a request** (or a CRM module) | Log the activity. `contactEmail` and `riskReason` are included so the CRM record shows which rule authorised the send. |
+The schema also accepts `spfPass` and `dkimPass` as booleans, and **Make should
+not send them.** No mailbox module exposes those verdicts as a boolean; they
+only exist inside the `Authentication-Results` header. Extracting them means
+pattern matching, and pattern matching in a Make expression is untestable
+logic living in the I/O shell — precisely what this project's split exists to
+avoid. Forward the raw header string and let `src/lib/auth-results.ts` decide.
+
+The temptation, when the header turns out to be awkward to reach in the mapping
+panel, is to hardcode `"spfPass": true` and move on. Don't. The
+`unverified_sender_requesting_account_data` rule is what stops a spoofed
+"what's my account balance" from reaching a human who will glance at a
+plausible draft and click approve. Hardcode that boolean and the rule becomes
+decoration while still looking present in the code.
+
+If the header is genuinely absent, send nothing. The parser reads a missing
+header as *not authenticated*, which routes the sensitive cases to escalation
+rather than to the approval queue.
+
+## Outbound — not a scenario
+
+The reply goes out through Resend from `src/lib/notify.ts`. `RESEND_API_KEY`
+and `RESEND_FROM` are the only configuration, and `RESEND_FROM` has to be on a
+domain verified in your Resend account. Nothing to build in Make.
 
 ## Scenario C — approval relay (3 modules)
 
@@ -127,6 +153,7 @@ Blueprint JSON embeds live values. Every one of these must be gone:
 - [ ] `"__IMTCONN__"` connection IDs → replace with `null`
 - [ ] Webhook URLs and hook IDs (`https://hook.*.make.com/...`)
 - [ ] The `Authorization` header value in scenario A module 5
+- [ ] Any captured `Authentication-Results` sample data — it names real hosts
 - [ ] Any captured `token` JWT in scenario C's learned webhook sample data
 - [ ] The mailbox address and any real sender addresses in sample data
 - [ ] `scheduling` blocks referencing a specific account
