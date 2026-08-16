@@ -11,8 +11,15 @@ import {
   recordOutboundMessage,
   resolveContact,
   resolveThread,
+  type ThreadState,
 } from "../lib/db";
-import { approvalLinks, notifySlack, sendReply } from "../lib/notify";
+import {
+  approvalLinks,
+  ESCALATION_ACK_BODY,
+  notifySlack,
+  sendEscalationAck,
+  sendReply,
+} from "../lib/notify";
 import {
   assessPreAgentRisk,
   assessRisk,
@@ -111,13 +118,7 @@ export const inboundEmail = schemaTask({
 
     if (earlyDecision !== null) {
       await recordDecision(message.id, classification, earlyDecision);
-      return finishWithoutReply(
-        earlyDecision,
-        payload,
-        classification,
-        thread.id,
-        thread.turnCount,
-      );
+      return finishWithoutReply(earlyDecision, payload, classification, thread);
     }
 
     // ---- 5. Agent loop -------------------------------------------------
@@ -158,13 +159,7 @@ export const inboundEmail = schemaTask({
       // rule moving across the pre/post boundary must not fall through here.
       case RiskTier.BLOCK:
       case RiskTier.ESCALATE:
-        return finishWithoutReply(
-          decision,
-          payload,
-          classification,
-          thread.id,
-          thread.turnCount,
-        );
+        return finishWithoutReply(decision, payload, classification, thread);
     }
   },
 });
@@ -174,8 +169,7 @@ async function finishWithoutReply(
   decision: RiskDecision,
   payload: InboundEmailPayload,
   classification: Classification,
-  threadId: string,
-  turnCount: number,
+  thread: ThreadState,
 ) {
   if (decision.tier === RiskTier.BLOCK) {
     logger.info("blocked, no reply sent", {
@@ -183,9 +177,19 @@ async function finishWithoutReply(
       intent: classification.intent,
       from: payload.from.email,
     });
-    await advanceThread(threadId, "closed", false, turnCount);
+    await advanceThread(thread.id, "closed", false, thread.turnCount);
     return { outcome: "blocked" as const, reason: decision.reason };
   }
+
+  // Tell the sender a human has it — but only once per thread, and only for
+  // rules that opted in. `status` is the thread as it was before this message,
+  // so a thread already in `escalated` has had its acknowledgment and a
+  // follow-up on the same subject does not get another one.
+  //
+  // No BLOCK rule can reach this branch, which is what keeps the auto-responder
+  // loop closed: our acknowledgment may well trip the recipient's own
+  // auto-reply, but that reply comes back marked automated, blocks, and stops.
+  const acknowledge = decision.acknowledge && thread.status !== "escalated";
 
   await notifySlack(
     [
@@ -196,11 +200,46 @@ async function finishWithoutReply(
       `*Intent:* ${classification.intent}`,
       "",
       "The agent did not draft anything. This thread needs a human.",
+      acknowledge
+        ? "_The sender has been told a colleague is picking it up._"
+        : "_The sender has not been contacted._",
     ].join("\n"),
   );
 
-  await advanceThread(threadId, "escalated", false, turnCount);
-  return { outcome: "escalated" as const, reason: decision.reason };
+  if (acknowledge) {
+    const subject = replySubject(payload.subject);
+
+    await sendEscalationAck({
+      threadKey: payload.threadKey,
+      inReplyTo: payload.messageId,
+      to: payload.from.email,
+      subject,
+      riskReason: decision.reason,
+    });
+
+    // Recorded like any other outbound message, so the acknowledgment counts
+    // toward countRepliesLast24h. An acknowledgment that did not count would
+    // be a send the reply cap cannot see.
+    await recordOutboundMessage(
+      thread.id,
+      payload.messageId,
+      subject,
+      ESCALATION_ACK_BODY,
+      decision,
+    );
+
+    logger.info("acknowledged escalation to sender", {
+      reason: decision.reason,
+      to: payload.from.email,
+    });
+  }
+
+  await advanceThread(thread.id, "escalated", false, thread.turnCount);
+  return {
+    outcome: "escalated" as const,
+    reason: decision.reason,
+    acknowledged: acknowledge,
+  };
 }
 
 /**

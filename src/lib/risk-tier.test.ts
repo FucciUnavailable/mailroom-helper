@@ -219,6 +219,7 @@ describe("assessRisk", () => {
       expect(assessPreAgentRisk(input)).toEqual({
         tier: expect.stringMatching(/^(BLOCK|ESCALATE)$/),
         reason,
+        acknowledge: expect.any(Boolean),
       });
     });
 
@@ -249,6 +250,7 @@ describe("assessRisk", () => {
       expect(assessPreAgentRisk(preAgent)).toEqual({
         tier: RiskTier.BLOCK,
         reason: "spam",
+        acknowledge: false,
       });
     });
 
@@ -268,6 +270,99 @@ describe("assessRisk", () => {
         }
       },
     );
+  });
+
+  describe("sender acknowledgment", () => {
+    // ESCALATE and BLOCK both send no AI-drafted reply, but they mean opposite
+    // things to the person who wrote in: ESCALATE means a human is handling it,
+    // BLOCK means nobody is. Only the first is worth telling them about.
+
+    const blocked: ReadonlyArray<[string, RiskInput]> = [
+      ["automated_sender", withInput({ isAutomatedSender: true })],
+      ["spam", withClass({ intent: "spam" })],
+      ["abuse", withClass({ intent: "abuse" })],
+    ];
+
+    it.each(blocked)(
+      "never acknowledges %s — an acknowledgment is a send, and BLOCK means send nothing",
+      (reason, input) => {
+        const d = assessRisk(input);
+        expect(d.tier).toBe(RiskTier.BLOCK);
+        expect(d.reason).toBe(reason);
+        expect(d.acknowledge).toBe(false);
+      },
+    );
+
+    it("never acknowledges an automated sender, which is what keeps the loop closed", () => {
+      // The load-bearing case. Acknowledging a bounce notifier or an
+      // out-of-office means our acknowledgment trips their auto-reply, which
+      // trips ours. Two auto-responders discovering each other is unbounded.
+      expect(
+        assessRisk(withInput({ isAutomatedSender: true })).acknowledge,
+      ).toBe(false);
+    });
+
+    it("does not acknowledge the reply cap — the acknowledgment would be the send the cap exists to prevent", () => {
+      const d = assessRisk(withInput({ repliesLast24h: 5 }));
+      expect(d.reason).toBe("reply_cap_exceeded");
+      expect(d.acknowledge).toBe(false);
+    });
+
+    const acknowledged: ReadonlyArray<[string, RiskInput]> = [
+      [
+        "unverified_sender_requesting_account_data",
+        withInput({
+          senderAuthenticated: false,
+          classification: { ...safe.classification, asksForAccountData: true },
+        }),
+      ],
+      ["model_requested_human", withClass({ needsHuman: true })],
+      ["agent_turn_limit", withInput({ threadTurnCount: 3 })],
+    ];
+
+    it.each(acknowledged)(
+      "acknowledges %s, because a human really is picking it up",
+      (reason, input) => {
+        const d = assessRisk(input);
+        expect(d.tier).toBe(RiskTier.ESCALATE);
+        expect(d.reason).toBe(reason);
+        expect(d.acknowledge).toBe(true);
+      },
+    );
+
+    it("does not acknowledge AUTO — the real reply is the acknowledgment", () => {
+      expect(assessRisk(safe).acknowledge).toBe(false);
+    });
+
+    it.each([
+      ["low_confidence", withClass({ confidence: 0.4 })],
+      ["account_data_disclosure", withClass({ asksForAccountData: true })],
+      ["external_write", withInput({ proposedWrites: ["crm_create_deal"] })],
+      ["ungrounded_answer", withInput({ hasGroundingEvidence: false })],
+    ] as ReadonlyArray<[string, RiskInput]>)(
+      "does not acknowledge %s — a draft is already waiting on a human",
+      (_reason, input) => {
+        const d = assessRisk(input);
+        expect(d.tier).toBe(RiskTier.APPROVE);
+        expect(d.acknowledge).toBe(false);
+      },
+    );
+
+    it("defaults to silence for a rule that does not opt in", () => {
+      // Not a behavioural assertion about today's rules so much as a guard on
+      // the default: `acknowledge` is optional on Rule, and the fallback must
+      // be false. A new rule added without thinking about it stays quiet
+      // rather than inheriting a customer email nobody reasoned about.
+      const everyDecision = [
+        ...blocked,
+        ...acknowledged,
+        ["no_rule_matched", safe] as [string, RiskInput],
+      ].map(([, input]) => assessRisk(input));
+
+      for (const d of everyDecision) {
+        expect(typeof d.acknowledge).toBe("boolean");
+      }
+    });
   });
 
   describe("input validation", () => {
