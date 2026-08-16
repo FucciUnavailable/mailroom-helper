@@ -106,15 +106,20 @@ create index if not exists kb_chunks_content_tsv_idx
 -- agent phrases it with one word we never wrote down.
 --
 -- match_threshold is the grounding floor and it is doing the same job the
--- cosine floor did. ts_rank grows with the number of distinct query lexemes a
--- chunk matches, so the default sits just above a single-lexeme hit: one
--- incidental word in common is a coincidence, not evidence. If nothing clears
--- it the tool returns zero rows, hasGroundingEvidence goes false, and the
--- reply is gated rather than invented.
+-- cosine floor did. If nothing clears it the tool returns zero rows,
+-- hasGroundingEvidence goes false, and the reply is gated rather than invented.
+--
+-- The default mirrors RANK_FLOOR in src/tools/kb-search.ts, which is where the
+-- number is reasoned about and where the measurement behind it is written down.
+-- Note that ts_rank does *not* rise reliably with the number of distinct query
+-- lexemes matched — it tracks term frequency, and an OR-ed query is diluted by
+-- the terms that miss, so a longer question scores lower. Tuning this by
+-- intuition produced a floor that rejected every real question. Re-run
+-- diagnostics/rank-check.sql instead.
 -- --------------------------------------------------------------------------
 create or replace function public.search_kb_chunks (
   query_text text,
-  match_threshold double precision default 0.08,
+  match_threshold double precision default 0.035,
   match_count integer default 5
 )
 returns table (

@@ -16,7 +16,7 @@ demonstrated judgment**, not completeness.
 ## Current state (as of 2026-08-16)
 
 The TypeScript side is green: `pnpm typecheck`, `pnpm lint`, and `pnpm test`
-(46 cases) all pass.
+(60 cases) all pass.
 
 **It has now run end to end against live mail**, in the Trigger.dev **dev**
 environment with `pnpm dev` open. A real email to the Resend receiving address
@@ -32,17 +32,33 @@ What that run has **not** established: nothing has been deployed. Production
 runs, a `tr_prod_…` key in Make, and the prod environment variables are all
 still to do — see `docs/deploy-checklist.md`.
 
-What that run **did** establish, and which changed the code: the first live
-question was held for approval under `ungrounded_answer`. The cause was
-retrieval, not policy. `RANK_FLOOR = 0.08` requires a chunk to match two or
-more distinct query lexemes, and an eight-chunk knowledge base written in spec
-vocabulary could not clear that for a short question like "what does it cost".
-The seed is now nineteen chunks written in customer vocabulary, and
-`supabase/diagnostics/rank-check.sql` measures the floor against a labelled
-probe set instead of reasoning about it. **On-premise/self-hosted deployment
-and HIPAA/BAA are held out of the seed deliberately** — they are the only live
-demonstration of `ungrounded_answer`, and adding chunks that mention them, even
-to say no, destroys it.
+What that run **did** establish, and which changed the code: live questions were
+held for approval under `ungrounded_answer`. The cause was retrieval, not
+policy, and it took two passes to find. The first pass blamed the corpus — an
+eight-chunk knowledge base written in spec vocabulary — and rewrote the seed to
+nineteen chunks in customer vocabulary. That was worth doing but was not the
+bug. The bug was `RANK_FLOOR = 0.08`, set from the assumption that `ts_rank`
+rises with the number of distinct query lexemes a chunk matches. **It does
+not.** `ts_rank` tracks term frequency, and an OR-ed query is diluted by the
+terms that miss, so a longer and more specific question scores *lower*. Measured
+against the seed: "SSO" alone scores 0.0608 and "SAML single sign-on" against
+the one chunk containing all three words scores the same 0.0608. At 0.08, zero
+of twenty-one grounded probes cleared the floor — every product question in the
+system was being routed to a human.
+
+The floor is now **0.035**, measured rather than argued: above the highest
+held-out probe (HIPAA at 0.0304, which hits the DPA chunk on "sign" +
+"compliant") and below the grounded probes that must pass. The working band is
+0.031–0.038; outside it, re-run `supabase/diagnostics/rank-check.sql`, which
+holds the labelled probe set including the verbatim live email that failed. It
+is not a perfect separator — eight grounded probes still sit under the floor and
+get held for approval. That is a corpus gap and the safe direction to fail; do
+not lower the floor to close it.
+
+**On-premise/self-hosted deployment and HIPAA/BAA are held out of the seed
+deliberately** — they are the only live demonstration of `ungrounded_answer`,
+and adding chunks that mention them, even to say no, destroys it. The lower
+bound of the floor's working band exists to protect the same thing.
 
 Two things remain reasoned about rather than measured, both in Resend's
 `GET /emails/receiving/{id}` response:
