@@ -14,20 +14,29 @@ and deliberately stays silent on spam.
 ## The architecture bet
 
 Make is excellent at connectors and poor at branching logic. Trigger.dev is the
-inverse. So mailbox polling and OAuth stay in Make, and every decision lives in
-typed TypeScript that can be tested and version controlled.
+inverse. So Make holds the HTTP plumbing nothing else can do, and every decision
+lives in typed TypeScript that can be tested and version controlled.
 
-The split is drawn per-connector, not per-direction. Watching a shared inbox
-earns a connector platform: OAuth, polling, header extraction, all of it
-tedious and none of it interesting. Sending is one authenticated POST to
-Resend, so it stays in TypeScript where it can be typed, retried, and made
-idempotent. "Use the connector platform for the connectors that are actually
-hard" is a more useful rule than "all I/O goes in Make".
+The split is drawn per-capability, not per-direction. Both Make scenarios exist
+for the same narrow reason — an HTTP shape mismatch. Trigger.dev v4 has no
+incoming-webhook trigger, so two modules turn Resend's `email.received` POST
+into a task trigger. A Slack hyperlink is a `GET` and completing a waitpoint is
+a `POST`, so three modules bridge that. Neither scenario parses anything.
+
+Everything else is TypeScript, including both halves of the mail. Sending is one
+authenticated POST to Resend. Receiving is a webhook that carries **metadata
+only** — no body, no headers — so the body, the thread key and the SPF/DKIM
+verdicts come from a second authenticated `GET`, and normalising that response
+is real logic that belongs somewhere it can be read. "Use the connector platform
+for the things that are actually hard" turns out to be a shorter list than it
+first looked.
 
 ```mermaid
 flowchart TD
-    A[Inbound email] --> B["Make scenario A<br/>Watch emails · loop-guard filter"]
-    B -->|HTTP POST| C["Trigger.dev: inbound-email<br/>idempotencyKey = Message-ID"]
+    A[Inbound email] --> A2[Resend receives]
+    A2 -->|email.received webhook| B["Make scenario A<br/>2-module relay · no parsing"]
+    B -->|HTTP POST| B2["Trigger.dev: resend-inbound<br/>GET the body + headers<br/>normalise · validate"]
+    B2 -->|"idempotencyKey = Message-ID"| C["Trigger.dev: inbound-email"]
 
     C --> D[Validate payload · zod]
     D --> E[Resolve sender against contacts]
@@ -52,10 +61,19 @@ flowchart TD
     L --> N[Reply delivered]
 ```
 
-The Make side is 8 modules across two scenarios. Everything that would have
-become an unreadable router tree is a function instead.
+The Make side is 5 modules across two scenarios, none of which makes a decision.
+Everything that would have become an unreadable router tree is a function
+instead.
 
-Two things in that diagram are worth pausing on.
+Three things in that diagram are worth pausing on.
+
+**Ingestion is two tasks, and the seam matters.** `resend-inbound` is the only
+part that knows Resend exists: it fetches the message, strips HTML, derives the
+thread key, and forwards the raw `Authentication-Results` header.
+`inbound-email` is a pure function of a validated payload and has no idea where
+that payload came from. That is what lets `pnpm sample` drive the entire system
+from a JSON fixture with no mail provider in the loop — and it is why swapping
+Resend for a real mailbox later is one new file, not a rewrite.
 
 **The gate runs twice, and the first pass is the cheap one.** Every BLOCK and
 ESCALATE rule is decidable from the classification alone, and both tiers mean
@@ -66,7 +84,7 @@ optimisation, not a precondition, and a test asserts the two never disagree.
 
 **Scenario C exists for a boring reason.** A Slack incoming webhook can only
 render a hyperlink, and a hyperlink is a `GET` — but completing a Trigger.dev
-waitpoint is a `POST`. Two modules bridge the two. The token's callback URL
+waitpoint is a `POST`. Three modules bridge the two. The token's callback URL
 carries its own secret, so the relay stores no credentials.
 
 ## What's real and what's mocked
@@ -84,7 +102,9 @@ Stated up front so you don't have to go find out.
 | CRM                          | Mocked    | Supabase `contacts` table. Swapping to HubSpot is one file: `src/tools/crm.ts` |
 | Meeting scheduling           | Mocked    | Returns a static booking link. No calendar writes.                             |
 | Lead enrichment              | Not built | Out of scope                                                                   |
+| Inbound ingestion            | **Real**  | Resend `email.received` → retrieve → normalise. Metadata-only webhook, so the body comes from a second call |
 | Make blueprints              | Partial   | Scenario C is committed and importable; A is specified in `make/README.md` but not exported |
+| Webhook signature check      | Not built | Resend signs with Svix; the Make relay drops it. See `make/README.md` |
 
 Seed data is synthetic throughout, on the RFC 2606 reserved `.test` and
 `.invalid` TLDs — a misconfigured demo cannot email a real person.
@@ -157,13 +177,24 @@ rather than invented — exactly as the cosine floor did. `src/tools/kb-search.t
 is the entire seam, so restoring pgvector is one function and no caller
 changes.
 
-**Sender authentication is parsed in TypeScript, not in Make.** No mailbox
-module exposes SPF and DKIM as booleans; they live inside the
-`Authentication-Results` header. Make forwards the raw string and
+**Sender authentication is parsed in TypeScript, and nowhere else.** SPF and
+DKIM are not exposed as booleans by anything upstream; they live inside the
+`Authentication-Results` header. The adapter forwards the raw string and
 `src/lib/auth-results.ts` decides, because a regex that gates account-data
 disclosure belongs somewhere it can be read and tested. A missing header reads
 as *not authenticated* — for a signal whose only job is to gate account data,
 unknown has to mean no.
+
+That last sentence is doing real work here, because whether Resend returns the
+header at all is not yet verified against a live response. If it doesn't, the
+mapping onto the payload's optional `spfPass`/`dkimPass` booleans is a change to
+one function. Until then the failure is a false escalation, never a false send.
+
+**The model never sees markup.** Resend hands back `text: null` for a message
+whose sender only produced an HTML part, and `src/lib/inbound-normalize.ts`
+strips it. That is not tidiness: an unstripped body buries the actual question
+inside a template's table scaffolding, and puts whatever the sender wrote in an
+HTML comment in front of a model that is about to draft a customer reply.
 
 ## Running it locally
 
@@ -198,11 +229,15 @@ Offline checks need no credentials at all:
 pnpm typecheck && pnpm lint && pnpm test
 ```
 
-### Running it from a real mailbox
+### Running it from real mail
 
-Build the two scenarios in `make/README.md`, then decide which Trigger.dev
-environment the inbound webhook points at. The secret key in scenario A's
-`Authorization` header is what chooses.
+Add a receiving address in Resend, build the two scenarios in `make/README.md`,
+and point the Resend webhook at scenario A. Subscribe it to **`email.received`
+only** — leave outbound events on and every reply the agent sends triggers a
+fresh ingestion of its own reply.
+
+Then decide which Trigger.dev environment the relay points at. The secret key in
+scenario A's `Authorization` header is what chooses.
 
 A `tr_dev_…` key routes runs to your **dev** environment, which only executes
 while `pnpm dev` is running on your machine. That is fine for wiring things up
@@ -227,7 +262,13 @@ nothing about whether Supabase, Anthropic, Resend, Slack, or Make are wired up
 correctly — none of those are touched without credentials. The three `pnpm
 sample` runs above are what actually proves the path end to end.
 
-One number in particular is unverified until you run it: the `RANK_FLOOR` in
+Two things about ingestion are unverified until real mail arrives, both in the
+Resend retrieve response: whether `headers` includes `Authentication-Results`,
+and which of the two shapes `headers` uses. `resendReceivedEmailSchema` accepts
+either shape, and a missing auth header fails safe toward escalation — but
+"accepts either" is not "saw it work".
+
+One number is unverified in the same way: the `RANK_FLOOR` in
 `src/tools/kb-search.ts` was reasoned about from how `ts_rank` scales with
 matched lexemes, not measured against a live database. Check that
 `general-question` retrieves the pricing and SSO chunks and that an
@@ -238,7 +279,9 @@ the one constant if not.
 
 ```
 src/
+  trigger/resend-inbound.ts  ingestion adapter — the only file that knows Resend
   trigger/inbound-email.ts   the spine — branching only
+  lib/inbound-normalize.ts   headers, addresses, threading, HTML → text
   agent/model.ts             the only place a model is named
   agent/classify.ts          generateObject, zod-validated
   agent/reply.ts             the tool loop
@@ -249,7 +292,7 @@ src/
   lib/db.ts, notify.ts       everything with I/O, kept out of the spine
   schemas.ts                 zod contracts for every boundary
   env.ts                     parsed at import; missing vars fail at boot
-make/README.md               the eight Make modules, spec'd
+make/README.md               the five Make modules, spec'd
 supabase/migrations/         schema + search_kb_chunks
 supabase/seed.sql            synthetic contacts and KB text
 scripts/                     send-sample, fixtures
