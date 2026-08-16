@@ -3,17 +3,87 @@ import { z } from "zod";
 /**
  * Every boundary contract in one file.
  *
- * Three kinds live here: what Make sends us, what we send back to Make and
- * Slack, and the input/output shape of each agent tool. Keeping them together
- * means "is every boundary validated?" is a question you answer by reading one
- * file rather than grepping the tree.
+ * Four kinds live here: what Make sends us, what Resend sends back when we ask
+ * for a received message, what we send on to Slack and Resend, and the
+ * input/output shape of each agent tool. Keeping them together means "is every
+ * boundary validated?" is a question you answer by reading one file rather than
+ * grepping the tree.
  *
  * The risk-tier contracts (`classificationSchema`, `riskInputSchema`) stay in
  * src/lib/risk-tier.ts, which owns them, and are re-exported at the bottom.
  */
 
 // ---------------------------------------------------------------------------
-// Inbound: Make scenario A -> Trigger.dev
+// Inbound step 1: Make scenario A -> Trigger.dev `resend-inbound`
+// ---------------------------------------------------------------------------
+
+/**
+ * What the relay forwards from Resend's `email.received` webhook.
+ *
+ * That webhook is **metadata only** — no body, no headers, no attachments — so
+ * three fields is genuinely all there is worth passing on. Everything the agent
+ * needs comes from the retrieve call in `src/trigger/resend-inbound.ts`.
+ *
+ * `receivedAt` is the envelope's `created_at` (when the mail arrived), not
+ * `data.created_at` (when Resend wrote the record). They differ by the ingest
+ * latency, and the first one is the one a human means by "received".
+ */
+export const resendInboundNoticeSchema = z.object({
+  /** Resend's own id for the received message. Keys the retrieve call. */
+  emailId: z.string().min(1),
+  /** RFC 5322 Message-ID, angle brackets included. */
+  messageId: z.string().min(1),
+  receivedAt: z.iso.datetime(),
+});
+
+export type ResendInboundNotice = z.infer<typeof resendInboundNoticeSchema>;
+
+// ---------------------------------------------------------------------------
+// Inbound step 2: Resend `GET /emails/receiving/{id}` -> Trigger.dev
+// ---------------------------------------------------------------------------
+
+/**
+ * Header collections arrive in one of the two shapes every mail API picks
+ * between, and which one Resend returns is **not verified against a live
+ * response yet**. Accepting both costs a union and removes an entire class of
+ * first-run failure; guessing wrong costs a demo.
+ *
+ * A repeated header (`Received:` appears once per hop) is legal and common,
+ * hence the array-valued map case.
+ */
+const resendHeadersSchema = z.union([
+  z.array(z.object({ name: z.string(), value: z.string() })),
+  z.record(z.string(), z.union([z.string(), z.array(z.string())])),
+]);
+
+export type ResendHeaders = z.infer<typeof resendHeadersSchema>;
+
+/**
+ * The retrieve response.
+ *
+ * Deliberately loose about everything we do not read. `attachments`, `raw` and
+ * `html_format` are returned and ignored — declaring them would only create a
+ * second place to update when Resend adds a field. What is pinned is the four
+ * things normalisation depends on, and `text` is pinned as *nullable* because
+ * an HTML-only message really does come back with `text: null`.
+ */
+export const resendReceivedEmailSchema = z.looseObject({
+  /** Absent in principle; the webhook's copy is the fallback. */
+  message_id: z.string().min(1).optional(),
+  from: z.string().min(1),
+  to: z.array(z.string()).default([]),
+  received_for: z.array(z.string()).default([]),
+  subject: z.string().nullish(),
+  /** Null whenever the sender's client only produced an HTML part. */
+  text: z.string().nullish(),
+  html: z.string().nullish(),
+  headers: resendHeadersSchema.default({}),
+});
+
+export type ResendReceivedEmail = z.infer<typeof resendReceivedEmailSchema>;
+
+// ---------------------------------------------------------------------------
+// Inbound step 3: `resend-inbound` -> `inbound-email`
 // ---------------------------------------------------------------------------
 
 /**
@@ -36,8 +106,9 @@ export const inboundEmailPayloadSchema = z.object({
   /** Message-ID this is a reply to, when the mail client set one. */
   inReplyTo: z.string().optional(),
   /**
-   * Stable conversation key. Make derives it from the References header when
-   * present and falls back to normalised-subject + sender.
+   * Stable conversation key: the first Message-ID in `References` when the
+   * client set one, else normalised-subject + sender. Derived in
+   * `src/lib/inbound-normalize.ts`.
    */
   threadKey: z.string().min(1),
 
@@ -47,7 +118,7 @@ export const inboundEmailPayloadSchema = z.object({
   }),
   to: z.array(z.email()).min(1),
   subject: z.string().default(""),
-  /** Plain-text body. HTML is stripped in Make so the agent never sees markup. */
+  /** Plain-text body. HTML is stripped upstream so the agent never sees markup. */
   text: z.string(),
 
   headers: loopGuardHeadersSchema.default({}),
@@ -55,10 +126,11 @@ export const inboundEmailPayloadSchema = z.object({
   /**
    * SPF and DKIM verdicts from the receiving mail server.
    *
-   * Optional because Make cannot produce them: no mailbox module exposes a
-   * boolean, only the raw `Authentication-Results` header below. Send either.
-   * Absent both, `resolveAuthentication` reads the sender as unauthenticated —
-   * see src/lib/auth-results.ts for why that direction is not negotiable.
+   * Optional because the ingestion path usually cannot produce them: the
+   * verdicts live inside the raw `Authentication-Results` header below, not as
+   * booleans. Send either. Absent both, `resolveAuthentication` reads the
+   * sender as unauthenticated — see src/lib/auth-results.ts for why that
+   * direction is not negotiable.
    */
   spfPass: z.boolean().optional(),
   dkimPass: z.boolean().optional(),
