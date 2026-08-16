@@ -52,9 +52,19 @@ export const inboundEmailPayloadSchema = z.object({
 
   headers: loopGuardHeadersSchema.default({}),
 
-  /** SPF and DKIM verdicts from the receiving mail server. */
-  spfPass: z.boolean(),
-  dkimPass: z.boolean(),
+  /**
+   * SPF and DKIM verdicts from the receiving mail server.
+   *
+   * Optional because Make cannot produce them: no mailbox module exposes a
+   * boolean, only the raw `Authentication-Results` header below. Send either.
+   * Absent both, `resolveAuthentication` reads the sender as unauthenticated —
+   * see src/lib/auth-results.ts for why that direction is not negotiable.
+   */
+  spfPass: z.boolean().optional(),
+  dkimPass: z.boolean().optional(),
+
+  /** Raw `Authentication-Results` header, parsed into the two verdicts above. */
+  authenticationResults: z.string().optional(),
 
   receivedAt: z.iso.datetime(),
 });
@@ -62,19 +72,20 @@ export const inboundEmailPayloadSchema = z.object({
 export type InboundEmailPayload = z.infer<typeof inboundEmailPayloadSchema>;
 
 // ---------------------------------------------------------------------------
-// Outbound: Trigger.dev -> Make scenario B
+// Outbound: Trigger.dev -> Resend
 // ---------------------------------------------------------------------------
 
 export const outboundEmailSchema = z.object({
   threadKey: z.string().min(1),
-  /** Set as In-Reply-To so the reply threads correctly in the client. */
+  /**
+   * The inbound Message-ID. Becomes In-Reply-To and References so the reply
+   * threads correctly, and doubles as the Resend idempotency key.
+   */
   inReplyTo: z.string().min(1),
   to: z.email(),
   subject: z.string().min(1),
   body: z.string().min(1),
-  /** Echoed back so scenario B can log the activity against the right contact. */
-  contactEmail: z.email().nullable(),
-  /** The rule that authorised this send. Logged to the CRM activity record. */
+  /** The rule that authorised this send. Logged with every dispatch. */
   riskReason: z.string().min(1),
 });
 
@@ -125,10 +136,11 @@ export const kbSearchOutputSchema = z.object({
     z.object({
       source: z.string(),
       content: z.string(),
-      similarity: z.number(),
+      /** ts_rank score. Ordering signal only — the floor is applied in SQL. */
+      rank: z.number(),
     }),
   ),
-  /** False when nothing cleared the similarity floor. Feeds the risk input. */
+  /** False when nothing cleared the relevance floor. Feeds the risk input. */
   grounded: z.boolean(),
 });
 

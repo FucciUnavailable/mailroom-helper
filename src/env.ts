@@ -10,7 +10,10 @@ const envSchema = z.object({
 
   ANTHROPIC_API_KEY: z.string().min(1),
 
-  MAKE_OUTBOUND_WEBHOOK_URL: z.url(),
+  RESEND_API_KEY: z.string().min(1),
+  /** Verified sending identity, e.g. `Mailroom <sales@yourdomain.com>`. */
+  RESEND_FROM: z.string().min(1),
+
   APPROVAL_RELAY_BASE_URL: z.url(),
   SLACK_WEBHOOK_URL: z.url(),
 });

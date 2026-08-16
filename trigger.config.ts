@@ -33,16 +33,6 @@ export default defineConfig({
   // covers active execution: classify, the agent loop, and two HTTP posts.
   maxDuration: 120,
   dirs: ["./src/trigger"],
-  build: {
-    /**
-     * The embedding pipeline pulls in onnxruntime-node, which ships prebuilt
-     * `.node` binaries for every platform. esbuild has no loader for those and
-     * fails the build outright, so the package stays out of the bundle and is
-     * installed into the run image instead. Externalising the parent is enough
-     * — esbuild never walks into it, so onnxruntime and sharp come along.
-     */
-    external: ["@huggingface/transformers"],
-  },
   retries: {
     enabledInDev: false,
     default: {

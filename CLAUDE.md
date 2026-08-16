@@ -17,11 +17,16 @@ demonstrated judgment**, not completeness.
 
 The TypeScript side is built and green: `pnpm typecheck`, `pnpm lint`, and
 `pnpm test` (46 cases) all pass. What has **not** been run is anything that
-touches a live service — no migration applied, no embedding seeded, no task
-triggered, no email sent. Treat "compiles and unit-tests pass" and "works end to
-end" as different claims until the live checklist in the README has been run.
+touches a live service — no migration applied, no task triggered, no email
+sent. Treat "compiles and unit-tests pass" and "works end to end" as different
+claims until the live checklist in the README has been run.
 
-`make/blueprints/` is deliberately empty. See `make/README.md`.
+Two values in particular are reasoned about rather than measured, and the first
+live run is what settles them: `RANK_FLOOR` in `src/tools/kb-search.ts`, and
+whether the mailbox module in Make scenario A actually surfaces
+`Authentication-Results` where the mapping panel can reach it.
+
+`make/blueprints/` holds scenario C only. See `make/README.md`.
 
 ## Commands
 
@@ -34,8 +39,9 @@ cp .env.example .env                   # fill in every value
 # does not run seed.sql against a hosted project, so it would only be half the
 # setup while looking like all of it.
 
-pnpm seed:kb                           # embeds kb_chunks locally, no API cost
 pnpm dev                               # trigger.dev dev (tasks run on your machine)
+pnpm deploy                            # trigger deploy — needed for a mailbox-driven
+                                       # demo; a dev run cannot survive the terminal
 
 pnpm typecheck                         # tsc --noEmit
 pnpm lint                              # eslint
@@ -57,11 +63,15 @@ account, and it is what the Loom records. Keep it working.
 ## Providers and cost
 
 - **Anthropic** (`@ai-sdk/anthropic`) for classification and the reply loop.
-  The only paid API in the stack. The model is named in exactly one place,
+  The only metered API in the stack. The model is named in exactly one place,
   `src/agent/model.ts` — swapping model or effort is a one-line change there
   and nowhere else.
-- **Local embeddings** via `@huggingface/transformers`, all-MiniLM-L6-v2, 384
-  dims, in-process. No API key, no cost, no network at query time.
+- **Resend** for outbound send, called directly from `src/lib/notify.ts` with
+  `fetch`. No SDK — it would be one wrapper around one POST. `RESEND_FROM` must
+  be on a domain verified in the Resend account; the shared `onboarding@
+  resend.dev` sender only delivers to the account owner's own address.
+- **Retrieval is Postgres full-text search**, not pgvector. No embedding model,
+  no cost, no cold-start download. See the RAG note below.
 - **Trigger.dev's free credit covers compute, not model calls.** Runs parked on
   `wait.forToken` are suspended and burn none of it.
 
@@ -83,7 +93,7 @@ restoring `effort` and the model id together — one edit, one file.
 | --- | --- |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | all table access; RLS is on with no policies, so the service role is the only way in |
 | `ANTHROPIC_API_KEY` | classify + reply agent |
-| `MAKE_OUTBOUND_WEBHOOK_URL` | POST target for Make scenario B |
+| `RESEND_API_KEY`, `RESEND_FROM` | outbound send in `src/lib/notify.ts` |
 | `APPROVAL_RELAY_BASE_URL` | Make scenario C, the GET→POST approval relay |
 | `SLACK_WEBHOOK_URL` | approval requests and escalation notices |
 | `TRIGGER_SECRET_KEY`, `TRIGGER_PROJECT_REF` | CLI, `trigger.config.ts`, `pnpm sample` |
@@ -124,20 +134,26 @@ Trigger.dev task: inbound-email  (all real logic, TypeScript)
   4. agent loop with tools (AI SDK)
   5. compute risk tier (pure function, src/lib/risk-tier.ts)
   6. BLOCK    -> log only, no reply
-     AUTO     -> POST Make scenario B
-     APPROVE  -> wait.forToken(), on approve POST Make scenario B
+     AUTO     -> send via Resend
+     APPROVE  -> wait.forToken(), on approve send via Resend
      ESCALATE -> notify human, no AI reply
 
-Make scenario B (outbound, ~3 modules)
-  Webhook -> send email -> log activity to CRM
+Make scenario C (approval relay, ~3 modules)
+  GET from a Slack link -> POST the token callback -> confirmation page
 ```
 
 ### Why the split
 
-Make owns connectors (mailbox auth, OAuth, sending) because that is genuinely
-tedious to hand-roll. Trigger.dev owns anything with branching, retries, or
-state because that is where Make becomes unmaintainable. This split is the
-central argument of the project and the README must lead with it.
+Make owns the connectors that are genuinely tedious to hand-roll: mailbox auth,
+OAuth, polling a shared inbox. Trigger.dev owns anything with branching,
+retries, or state because that is where Make becomes unmaintainable. This split
+is the central argument of the project and the README must lead with it.
+
+The split is per-connector, not per-direction. **Sending is not in Make** — it
+is a direct Resend call in `src/lib/notify.ts`, because one authenticated POST
+does not need a connector platform, and routing it through a webhook would add
+a hop, an untyped payload, and a scenario to maintain. Do not reintroduce an
+outbound scenario.
 
 ### Why waitpoints for approval
 
@@ -152,8 +168,13 @@ callback URL.
 ### In scope, build for real
 
 - Inbound to reply, end to end, actually working from a clean clone
-- One genuine RAG tool: pgvector similarity search over a small seeded knowledge
-  base in Supabase
+- One genuine retrieval tool over a small seeded knowledge base in Supabase.
+  **This is Postgres full-text search, not pgvector.** The vector path cost a
+  ~90MB model download on every deployed cold start against a 120s ceiling,
+  which is not a trade worth making for eight chunks. What was kept is the
+  grounding floor: no rows above it means `hasGroundingEvidence: false` and the
+  reply is gated rather than invented. `src/tools/kb-search.ts` is the whole
+  seam — restoring pgvector is one function and no caller changes.
 - Waitpoint approval branch with a working approve link
 - Idempotency (Message-ID) and auto-responder loop guards
 - Spam classified, logged, and **not replied to**
@@ -176,10 +197,12 @@ callback URL.
 - `threads` - id, thread_key, contact_id, status, turn_count, last_message_at
 - `messages` - id, thread_id, message_id (unique), direction, subject, body,
   classification jsonb, risk_tier, created_at
-- `kb_chunks` - id, source, content, embedding vector(384)
+- `kb_chunks` - id, source, content, content_tsv (generated tsvector, GIN)
 
 `messages.message_id` unique is the database-level idempotency backstop. The
-Trigger.dev `idempotencyKey` is the first line of defense.
+Trigger.dev `idempotencyKey` is the first line of defense. The Resend
+`Idempotency-Key` header is the third, and it is the only one covering a send
+that succeeds remotely but fails before the outbound row is written.
 
 ## Risk tier rules
 

@@ -1,11 +1,9 @@
 -- Mailroom schema.
 --
--- Four tables, one vector index, one similarity function. Everything is
+-- Four tables, one full-text index, one search function. Everything is
 -- reached through the service role from the Trigger.dev task, so RLS is
 -- enabled with no policies: the service role bypasses it, and anon/authenticated
 -- get nothing. There is no client-side reader by design.
-
-create extension if not exists vector with schema extensions;
 
 -- --------------------------------------------------------------------------
 -- contacts — the mocked CRM. Swapping to HubSpot replaces src/tools/crm.ts,
@@ -73,63 +71,82 @@ create index if not exists messages_outbound_recent_idx
   where direction = 'outbound';
 
 -- --------------------------------------------------------------------------
--- kb_chunks — the knowledge base behind the one real RAG tool.
+-- kb_chunks — the knowledge base behind the retrieval tool.
 --
--- embedding is nullable so seed.sql can ship readable text with no vector
--- literals in git; scripts/seed-kb.ts fills them in on setup.
+-- Retrieval is Postgres full-text search, not pgvector. A knowledge base this
+-- small does not need semantic search to answer the questions in the demo, and
+-- the vector path cost a 90MB model download inside the deployed container on
+-- every cold start. The tool contract in src/tools/kb-search.ts is unchanged,
+-- so swapping this function back to a cosine search is a one-function change
+-- that no caller sees.
 --
--- 384 dims to match all-MiniLM-L6-v2, which runs locally in-process via
--- transformers.js. Embeddings are the one part of the pipeline with no API
--- cost and no provider account. Changing embedding model means changing this
--- number and re-running the seed — the column width is not negotiable at
--- query time.
+-- content_tsv is generated rather than maintained by a trigger: to_tsvector
+-- with an explicit regconfig is immutable, which is exactly the condition
+-- Postgres requires, and it cannot drift out of sync with content.
 -- --------------------------------------------------------------------------
 create table if not exists public.kb_chunks (
-  id         uuid primary key default gen_random_uuid(),
-  source     text not null,
-  content    text not null,
-  embedding  extensions.vector(384),
-  created_at timestamptz not null default now()
+  id          uuid primary key default gen_random_uuid(),
+  source      text not null,
+  content     text not null,
+  content_tsv tsvector generated always as (to_tsvector('english', content)) stored,
+  created_at  timestamptz not null default now()
 );
 
--- HNSW rather than IVFFlat: IVFFlat needs a populated table to build a useful
--- list structure, and this knowledge base is deliberately tiny.
-create index if not exists kb_chunks_embedding_idx
+create index if not exists kb_chunks_content_tsv_idx
   on public.kb_chunks
-  using hnsw (embedding extensions.vector_cosine_ops);
+  using gin (content_tsv);
 
 -- --------------------------------------------------------------------------
--- match_kb_chunks — cosine similarity search.
+-- search_kb_chunks — ranked full-text search.
 --
--- The threshold is the grounding floor. If nothing clears it the tool returns
--- zero rows, hasGroundingEvidence goes false, and the reply is gated rather
--- than invented.
+-- The query is normalised into lexemes and OR-ed together rather than passed
+-- through plainto_tsquery, which ANDs. ANDing is wrong here: the agent writes
+-- a natural-language question, and requiring every lexeme to appear means a
+-- question the knowledge base *does* answer returns nothing the moment the
+-- agent phrases it with one word we never wrote down.
+--
+-- match_threshold is the grounding floor and it is doing the same job the
+-- cosine floor did. ts_rank grows with the number of distinct query lexemes a
+-- chunk matches, so the default sits just above a single-lexeme hit: one
+-- incidental word in common is a coincidence, not evidence. If nothing clears
+-- it the tool returns zero rows, hasGroundingEvidence goes false, and the
+-- reply is gated rather than invented.
 -- --------------------------------------------------------------------------
-create or replace function public.match_kb_chunks (
-  query_embedding extensions.vector(384),
-  match_threshold double precision default 0.3,
+create or replace function public.search_kb_chunks (
+  query_text text,
+  match_threshold double precision default 0.08,
   match_count integer default 5
 )
 returns table (
-  id         uuid,
-  source     text,
-  content    text,
-  similarity double precision
+  id      uuid,
+  source  text,
+  content text,
+  rank    double precision
 )
 language sql
 stable
 security invoker
-set search_path = public, extensions
+set search_path = public
 as $$
+  with q as (
+    select to_tsquery(
+      'english',
+      array_to_string(
+        tsvector_to_array(to_tsvector('english', query_text)),
+        ' | '
+      )
+    ) as query
+  )
   select
     c.id,
     c.source,
     c.content,
-    1 - (c.embedding <=> query_embedding) as similarity
+    ts_rank(c.content_tsv, q.query)::double precision as rank
   from public.kb_chunks c
-  where c.embedding is not null
-    and 1 - (c.embedding <=> query_embedding) >= match_threshold
-  order by c.embedding <=> query_embedding
+  cross join q
+  where c.content_tsv @@ q.query
+    and ts_rank(c.content_tsv, q.query) >= match_threshold
+  order by rank desc
   limit match_count;
 $$;
 
