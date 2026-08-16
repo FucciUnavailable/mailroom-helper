@@ -21,16 +21,17 @@ looks like a bug:
 
 > **It deliberately does not answer everything.** Deciding when *not* to reply
 > is most of the work in an autonomous email agent, so some messages get an
-> answer, some get drafted and held for a human, some get a short "a colleague
-> is picking this up", and one kind gets nothing at all. Not answering is an
-> outcome, not a failure.
+> answer, some get a short "a colleague is picking this up" while a human
+> decides, and one kind gets nothing at all. Only that last kind is silent —
+> anything a person is genuinely dealing with gets told so. Not answering the
+> question is an outcome, not a failure.
 
 Four things worth trying:
 
 | Send it | What happens | Why |
 | --- | --- | --- |
 | A product question — pricing, SSO, uptime, GDPR | Replies automatically | It found a grounded answer in the knowledge base |
-| "Can we run this on-premise?" | **No answer.** A draft is held for human approval | The knowledge base genuinely does not cover it, so an answer would be invented. It gets a human's eyes before it goes anywhere |
+| "Can we run this on-premise?" | **No answer** — a short note saying a colleague has it, while a draft waits for human approval | The knowledge base genuinely does not cover it, so an answer would be invented. It gets a human's eyes before it goes anywhere. The note goes out before the wait rather than after it: if the reviewer rejects the draft or never clicks, the only other outcome is silence for a day |
 | "What's my current invoice?" | **No answer** — but you get a short note saying a colleague has it | You are not a recognised, authenticated contact. Account data never goes out on a spoofable sender, and it does not even reach the approval queue: a human shown a plausible draft clicks yes. Note what the acknowledgment does *not* say — it never explains that verification failed, because that tells a spoofer what to forge next |
 | A cold sales pitch | **Nothing at all.** Logged and dropped | Auto-replying confirms a live, monitored address and gets you on more lists. This is the one case that gets no acknowledgment either — replying to an auto-responder means it replies to us, and two auto-responders discovering each other is an unbounded loop |
 

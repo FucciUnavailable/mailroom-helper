@@ -20,6 +20,15 @@
 --
 -- A floor is correct when every 'grounded' row has hits > 0 and every
 -- 'ungrounded' row has hits = 0. Query 2 finds that range for you.
+--
+-- Last run 2026-08-16, against the nineteen-chunk seed. The two groups are not
+-- fully separable: the HIPAA probe scores 0.0304 because "sign" and "compliant"
+-- both land in the GDPR/DPA chunk, and eight grounded probes score at or below
+-- that. The floor is therefore set at 0.035 — above every held-out probe, which
+-- is the constraint that cannot be traded away — and the eight grounded probes
+-- underneath it are held for human approval rather than answered. That is the
+-- safe direction, and it is a corpus gap, not a threshold to lower: closing it
+-- means chunks that use those questions' words, and re-running this file.
 
 -- --------------------------------------------------------------------------
 -- The probe set. Phrased the way a person types, not the way the seed is
@@ -35,6 +44,11 @@ select * from (values
   ('grounded',   'free trial',        'Do you offer a free trial?'),
   ('grounded',   'plan difference',   'What is the difference between Team and Enterprise?'),
   ('grounded',   'sso',               'Do you support SAML single sign-on?'),
+  -- Verbatim from the first live test email, which was held for approval under
+  -- ungrounded_answer at the old 0.08 floor while the SSO chunk sat at the top
+  -- of the result set scoring 0.0405. Kept as a probe so that regression is
+  -- caught here rather than in someone's inbox.
+  ('grounded',   'live email 1',      'What is the difference between your Team and Enterprise plans, and do you support SAML single sign-on?'),
   ('grounded',   'security',          'How is our data encrypted and are you SOC 2?'),
   ('grounded',   'cancel',            'Can we cancel any time or is there a contract?'),
   ('grounded',   'refund',            'Do you give refunds?'),
@@ -66,7 +80,7 @@ select * from (values
 --
 -- Change :floor to try a different value.
 -- --------------------------------------------------------------------------
-with settings as (select 0.08::double precision as floor),
+with settings as (select 0.035::double precision as floor),
      scored as (
        select p.expectation,
               p.label,

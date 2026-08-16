@@ -16,7 +16,7 @@ demonstrated judgment**, not completeness.
 ## Current state (as of 2026-08-16)
 
 The TypeScript side is green: `pnpm typecheck`, `pnpm lint`, and `pnpm test`
-(46 cases) all pass.
+(60 cases) all pass.
 
 **It has now run end to end against live mail**, in the Trigger.dev **dev**
 environment with `pnpm dev` open. A real email to the Resend receiving address
@@ -32,17 +32,33 @@ What that run has **not** established: nothing has been deployed. Production
 runs, a `tr_prod_…` key in Make, and the prod environment variables are all
 still to do — see `docs/deploy-checklist.md`.
 
-What that run **did** establish, and which changed the code: the first live
-question was held for approval under `ungrounded_answer`. The cause was
-retrieval, not policy. `RANK_FLOOR = 0.08` requires a chunk to match two or
-more distinct query lexemes, and an eight-chunk knowledge base written in spec
-vocabulary could not clear that for a short question like "what does it cost".
-The seed is now nineteen chunks written in customer vocabulary, and
-`supabase/diagnostics/rank-check.sql` measures the floor against a labelled
-probe set instead of reasoning about it. **On-premise/self-hosted deployment
-and HIPAA/BAA are held out of the seed deliberately** — they are the only live
-demonstration of `ungrounded_answer`, and adding chunks that mention them, even
-to say no, destroys it.
+What that run **did** establish, and which changed the code: live questions were
+held for approval under `ungrounded_answer`. The cause was retrieval, not
+policy, and it took two passes to find. The first pass blamed the corpus — an
+eight-chunk knowledge base written in spec vocabulary — and rewrote the seed to
+nineteen chunks in customer vocabulary. That was worth doing but was not the
+bug. The bug was `RANK_FLOOR = 0.08`, set from the assumption that `ts_rank`
+rises with the number of distinct query lexemes a chunk matches. **It does
+not.** `ts_rank` tracks term frequency, and an OR-ed query is diluted by the
+terms that miss, so a longer and more specific question scores *lower*. Measured
+against the seed: "SSO" alone scores 0.0608 and "SAML single sign-on" against
+the one chunk containing all three words scores the same 0.0608. At 0.08, zero
+of twenty-one grounded probes cleared the floor — every product question in the
+system was being routed to a human.
+
+The floor is now **0.035**, measured rather than argued: above the highest
+held-out probe (HIPAA at 0.0304, which hits the DPA chunk on "sign" +
+"compliant") and below the grounded probes that must pass. The working band is
+0.031–0.038; outside it, re-run `supabase/diagnostics/rank-check.sql`, which
+holds the labelled probe set including the verbatim live email that failed. It
+is not a perfect separator — eight grounded probes still sit under the floor and
+get held for approval. That is a corpus gap and the safe direction to fail; do
+not lower the floor to close it.
+
+**On-premise/self-hosted deployment and HIPAA/BAA are held out of the seed
+deliberately** — they are the only live demonstration of `ungrounded_answer`,
+and adding chunks that mention them, even to say no, destroys it. The lower
+bound of the floor's working band exists to protect the same thing.
 
 Two things remain reasoned about rather than measured, both in Resend's
 `GET /emails/receiving/{id}` response:
@@ -65,9 +81,11 @@ emails, one per path through `risk-tier.ts`. Keep it accurate when risk rules
 change — each template names the rule id it should trigger, so a rename that
 skips these files leaves instructions that quietly stop matching reality.
 
-Three of the five templates produce no email on purpose. That is the first
-thing the handoff note says, because BLOCK and ESCALATE read as a broken agent
-to anyone who has not been told.
+Three of the five templates never produce an AI-written answer, and one of
+those — spam — produces no email at all. That is the first thing the handoff
+note says, because a reviewer who has not been told reads all three as a broken
+agent. The other two send the fixed holding note instead, so the only true
+silence in the system is BLOCK.
 
 `docs/deploy-checklist.md` is dev → production, in order, with verification at
 each step.
@@ -319,7 +337,7 @@ Invariants the test suite enforces, worth knowing before editing the rule array:
   - **`reply_cap_exceeded` must not acknowledge**, even though it is ESCALATE.
     It fires because we have already sent five emails to this thread in 24h;
     the acknowledgment would be the sixth.
-  - The copy is `ESCALATION_ACK_BODY` in `src/lib/notify.ts`, a constant, and
+  - The copy is `HOLDING_ACK_BODY` in `src/lib/notify.ts`, a constant, and
     must stay one. No model runs on an escalated message, so a generated
     acknowledgment would reintroduce exactly the fabrication risk that
     escalating was meant to avoid. It also states no reason — naming the failed
@@ -328,6 +346,25 @@ Invariants the test suite enforces, worth knowing before editing the rule array:
   The once-per-thread guard lives in `finishWithoutReply` and reads
   `thread.status`, which is why `resolveThread` returns the status as it was
   *before* this message.
+
+**APPROVE acknowledges too, and that is task-level rather than rule-level.**
+`waitForApproval` sends the same `HOLDING_ACK_BODY` before parking on the
+waitpoint, guarded on `thread.status` not already being `awaiting_approval` or
+`escalated`. It is not driven by a rule's `acknowledge` flag because it is not a
+property of any one rule: the reason is structural. Of the four ways out of the
+waitpoint, only `approve` sends the customer anything — reject and the 24 hour
+timeout both notify Slack and stop — so without an acknowledgment up front,
+those branches are permanent silence toward someone who asked a real question.
+One acknowledgment when the draft is queued covers all three. The cost is that a
+fast approval arrives as a second email a few minutes later.
+
+**The Resend `Idempotency-Key` is scoped by `OutboundKind`, not by Message-ID
+alone**, and this is what makes the above safe. The acknowledgment and the
+approved reply answer the same inbound message. Keyed on the Message-ID alone
+they collide: Resend returns the first send, the customer gets the
+acknowledgment and never the answer, and `sendReply` logs a delivery that did
+not happen. Sends of the same kind must still collide — that is the retry
+protection the key exists for.
 
 ## Definition of done
 
