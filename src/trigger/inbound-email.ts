@@ -147,6 +147,26 @@ export const inboundEmail = schemaTask({
       repliesLast24h,
     };
 
+    // Every input the tier is about to be computed from, in one line.
+    //
+    // The decision itself is already audited — `reason` is the rule id and it
+    // is logged wherever the tier is acted on. What was missing is *why that
+    // rule matched*, and the two most common escalations both turn on booleans
+    // that were being derived and discarded here. Without them, working out
+    // whether a message escalated because SPF failed or because the sender
+    // simply is not in the contacts table means reasoning from the rule
+    // predicate backwards, which is exactly the debugging this line removes.
+    logger.info("risk input", {
+      ...baseRiskInput,
+      // Not part of the decision, but the two things you want next when it
+      // looks wrong: the verdicts separately, since the rule only sees them
+      // ANDed together, and whether the header they came from arrived at all.
+      spfPass: auth.spfPass,
+      dkimPass: auth.dkimPass,
+      hasAuthenticationResults: payload.authenticationResults !== undefined,
+      from: payload.from.email,
+    });
+
     // ---- 4. Pre-agent gate ---------------------------------------------
     // BLOCK and ESCALATE both mean no AI-drafted reply is ever sent, so there
     // is nothing for the agent to write. Short-circuiting here is what keeps

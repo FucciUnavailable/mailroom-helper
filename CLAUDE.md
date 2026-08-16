@@ -60,19 +60,25 @@ deliberately** — they are the only live demonstration of `ungrounded_answer`,
 and adding chunks that mention them, even to say no, destroys it. The lower
 bound of the floor's working band exists to protect the same thing.
 
-Two things remain reasoned about rather than measured, both in Resend's
-`GET /emails/receiving/{id}` response:
+**`Authentication-Results` is confirmed present.** A live dev run of a Gmail
+message logged `hasAuthenticationResults: true` on the `handed off to
+inbound-email` line, so Resend does forward the header and
+`parseAuthenticationResults` is reading a real string rather than defaulting to
+unauthenticated. The contingency that used to sit here — mapping Resend's own
+SPF/DKIM verdicts onto the payload's optional `spfPass`/`dkimPass` booleans in
+`src/trigger/resend-inbound.ts` — is not needed and was never written.
 
-- Whether it includes `Authentication-Results` in `headers`. The
-  `handed off to inbound-email` log line carries `hasAuthenticationResults`, so
-  the next production run settles it by inspection. If it does not, Resend runs
-  its own inbound SPF/DKIM checks and those map onto the payload's optional
-  `spfPass`/`dkimPass` booleans — a change to `authenticationResults` in
-  `src/trigger/resend-inbound.ts` and nowhere else. Absent both, the parser
-  reads the sender as unauthenticated, which is the correct direction to fail.
-- Which shape that response's `headers` uses. `resendReceivedEmailSchema`
-  accepts both an array of `{name, value}` and a map, so either works, but only
-  one is real.
+Not yet confirmed is whether both verdicts actually come back `pass`, which is
+the half the risk rule consumes. `senderAuthenticated` is `spfPass && dkimPass`,
+so one softfail is indistinguishable from a missing header at the rule. The
+`risk input` log line in `inbound-email.ts` now carries both verdicts separately
+alongside `contactResolved`, which is what tells you which half of
+`unverified_sender_requesting_account_data` matched. Read it before changing
+anything about authentication.
+
+One thing remains reasoned about rather than measured: which shape the
+response's `headers` uses. `resendReceivedEmailSchema` accepts both an array of
+`{name, value}` and a map, so either works, but only one is real.
 
 ## Handoff material
 
