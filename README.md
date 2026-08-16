@@ -4,7 +4,7 @@ An AI email agent for a shared sales inbox. It reads inbound mail, answers what
 it can from a knowledge base, routes anything sensitive to a human for approval,
 and deliberately stays silent on spam.
 
-**[Watch the 4 minute walkthrough](TODO-loom-link)**
+**[Watch the walkthrough](https://www.loom.com/share/e66ade145ec3410493fb4a9dd402814a)**
 
 > Built as a working reference for how I'd structure an AI digital employee:
 > Make for connectors, Trigger.dev for typed durable logic.
