@@ -27,7 +27,10 @@ if (!projectRef) {
 
 export default defineConfig({
   project: projectRef,
-  runtime: "node",
+  // Not plain "node" — that pins Node 21 on the deploy image, which has no
+  // global WebSocket, and @supabase/supabase-js throws on import without one.
+  // `pnpm dev` never sees it because it runs on the local Node (24).
+  runtime: "node-24",
   logLevel: "log",
   // A run parked on wait.forToken is suspended, not billed. This ceiling only
   // covers active execution: classify, the agent loop, and two HTTP posts.
