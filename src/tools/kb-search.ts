@@ -19,6 +19,18 @@ import {
  * The same number is the SQL function's default. It is passed explicitly
  * anyway: the floor is a product decision about when we are willing to answer,
  * and it belongs somewhere a reviewer reads, not only in a migration.
+ *
+ * Requiring two matched lexemes cuts both ways, and the cost lands on short
+ * questions: "what does it cost?" carries two content words, so a chunk that
+ * says "custom-priced" and never says "cost" is not evidence and the reply
+ * gets held for approval. That is the floor working correctly on a knowledge
+ * base that was too thin — the fix is chunks written in the words people ask
+ * in, which is why seed.sql now covers pricing, trials, cancellation, the API,
+ * uptime, GDPR and limits, and says so in customer vocabulary.
+ *
+ * Measure before changing this number: supabase/diagnostics/rank-check.sql
+ * runs a labelled probe set through this exact function and prints the range
+ * of floors that separates "we answer this" from the held-out subjects.
  */
 const RANK_FLOOR = 0.08;
 const MAX_CHUNKS = 4;
@@ -38,7 +50,7 @@ interface MatchRow {
  * it into the risk input, and the model is told to offer a human instead of
  * guessing.
  *
- * Lexical, not semantic. At eight chunks that is the right trade, and this
+ * Lexical, not semantic. At nineteen chunks that is the right trade, and this
  * function is the whole seam: restoring pgvector means changing the RPC call
  * below and nothing else in the codebase.
  */

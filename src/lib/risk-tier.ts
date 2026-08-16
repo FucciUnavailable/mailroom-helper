@@ -76,6 +76,17 @@ export interface RiskDecision {
   tier: RiskTier;
   /** The rule that fired. Logged verbatim so decisions are auditable. */
   reason: string;
+  /**
+   * Send the sender a fixed acknowledgment — "a colleague is picking this up" —
+   * instead of leaving them in silence.
+   *
+   * A property of the *rule*, not of the tier, because the tiers do not split
+   * cleanly on it. It is never set on a BLOCK rule and it is deliberately not
+   * set on every ESCALATE rule; see the rule arrays for the reasoning in each
+   * case. The copy is a constant in `src/lib/notify.ts` and contains no
+   * customer facts, so acknowledging costs nothing the agent could get wrong.
+   */
+  acknowledge: boolean;
 }
 
 const MAX_AGENT_TURNS = 3;
@@ -85,6 +96,12 @@ const MIN_CONFIDENCE = 0.6;
 interface Rule<I> {
   id: string;
   tier: RiskTier;
+  /**
+   * Acknowledge to the sender. Defaults to false, and the default is the safe
+   * one: a new rule stays silent until someone decides otherwise, rather than
+   * inheriting a reply it was never reasoned about.
+   */
+  acknowledge?: boolean;
   when: (i: I) => boolean;
 }
 
@@ -121,6 +138,11 @@ const PRE_AGENT_RULES: ReadonlyArray<Rule<PreAgentRiskInput>> = [
   {
     id: "reply_cap_exceeded",
     tier: RiskTier.ESCALATE,
+    // No acknowledgment, and this is the one ESCALATE rule where that is not a
+    // judgement call. The rule exists because we have already sent this thread
+    // five emails in 24 hours and must stop; an acknowledgment would be the
+    // sixth. Setting `acknowledge` here would mean every further message on the
+    // thread triggers exactly the send the cap was written to prevent.
     when: (i) => i.repliesLast24h >= MAX_REPLIES_24H,
   },
   {
@@ -129,6 +151,16 @@ const PRE_AGENT_RULES: ReadonlyArray<Rule<PreAgentRiskInput>> = [
     // Envelope sender is spoofable. Never let an unauthenticated address pull
     // account data, even behind an approval gate: the approver sees a plausible
     // draft and clicks yes.
+    //
+    // Acknowledged, with one eye open. This is the most common escalation in
+    // practice — while `Authentication-Results` is unverified, every account
+    // question lands here — and silence toward someone asking about their own
+    // invoice is the worst experience the system produces. The acknowledgment
+    // discloses nothing and, deliberately, does not say *why* a human is
+    // involved: telling a spoofer that verification failed tells them what to
+    // forge next. The residual risk is backscatter to a forged address, bounded
+    // by the once-per-thread guard in inbound-email.ts.
+    acknowledge: true,
     when: (i) =>
       i.classification.asksForAccountData &&
       (!i.senderAuthenticated || !i.contactResolved),
@@ -136,12 +168,22 @@ const PRE_AGENT_RULES: ReadonlyArray<Rule<PreAgentRiskInput>> = [
   {
     id: "model_requested_human",
     tier: RiskTier.ESCALATE,
+    // Legal, complaints, cancellations, money moving. A person is genuinely
+    // picking this up, which is exactly what the acknowledgment promises.
+    acknowledge: true,
     when: (i) => i.classification.needsHuman,
   },
   {
     id: "agent_turn_limit",
     tier: RiskTier.ESCALATE,
     // If three exchanges have not resolved it, a fourth will not either.
+    //
+    // The sender is mid-conversation and has had replies until now, so going
+    // abruptly silent reads as being ignored. Distinct from reply_cap_exceeded:
+    // that rule is a hard budget on outbound volume, this one is a judgement
+    // that the agent is not converging, and one more short message does not
+    // undermine it.
+    acknowledge: true,
     when: (i) => i.threadTurnCount >= MAX_AGENT_TURNS,
   },
 ];
@@ -183,7 +225,11 @@ function firstMatch<I>(
 ): RiskDecision | null {
   for (const rule of rules) {
     if (rule.when(input)) {
-      return { tier: rule.tier, reason: rule.id };
+      return {
+        tier: rule.tier,
+        reason: rule.id,
+        acknowledge: rule.acknowledge ?? false,
+      };
     }
   }
   return null;
@@ -215,6 +261,9 @@ export function assessRisk(raw: unknown): RiskDecision {
     firstMatch(POST_AGENT_RULES, input) ?? {
       tier: RiskTier.AUTO,
       reason: "no_rule_matched",
+      // AUTO sends the real reply. An acknowledgment on top of it would be a
+      // second email saying less.
+      acknowledge: false,
     }
   );
 }

@@ -6,9 +6,22 @@ import { supabase } from "./supabase";
  * Every database access the task makes, so the task file stays branching-only.
  */
 
+export type ThreadStatus =
+  | "open"
+  | "awaiting_approval"
+  | "escalated"
+  | "closed";
+
 export interface ThreadState {
   id: string;
   turnCount: number;
+  /**
+   * Status as it was *before* this message was handled. Read by the
+   * acknowledgment guard: a thread already sitting in `escalated` has had its
+   * "a colleague is picking this up" email, and repeating it on every follow-up
+   * is noise the sender did not ask for.
+   */
+  status: ThreadStatus;
 }
 
 export interface ContactState {
@@ -42,12 +55,12 @@ export async function resolveThread(
       { thread_key: threadKey, contact_id: contactId },
       { onConflict: "thread_key" },
     )
-    .select("id, turn_count")
-    .single<{ id: string; turn_count: number }>();
+    .select("id, turn_count, status")
+    .single<{ id: string; turn_count: number; status: ThreadStatus }>();
 
   if (error) throw new Error(`resolveThread failed: ${error.message}`);
 
-  return { id: data.id, turnCount: data.turn_count };
+  return { id: data.id, turnCount: data.turn_count, status: data.status };
 }
 
 /**
@@ -140,7 +153,7 @@ export async function countRepliesLast24h(threadId: string): Promise<number> {
 
 export async function advanceThread(
   threadId: string,
-  status: "open" | "awaiting_approval" | "escalated" | "closed",
+  status: ThreadStatus,
   incrementTurn: boolean,
   currentTurnCount: number,
 ): Promise<void> {

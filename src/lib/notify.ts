@@ -91,6 +91,45 @@ export async function sendReply(email: OutboundEmail): Promise<void> {
   });
 }
 
+/**
+ * What an escalated sender receives instead of silence.
+ *
+ * A constant, not a generated draft, and that is the entire safety argument: no
+ * model runs on an escalated message, so there is nothing here that can invent
+ * an account status, promise a refund, or quote a price. It is the same text
+ * every time and it can be read in full, right here, by whoever is deciding
+ * whether it is safe to send.
+ *
+ * Two things it deliberately does not do. It does not say **why** a human is
+ * involved — "we could not verify your identity" tells a spoofer precisely what
+ * to forge next, and `unverified_sender_requesting_account_data` is the rule
+ * that sends this most often. And it does not promise a timeframe we have not
+ * agreed to; "shortly" is a commitment the support plan may not carry, so the
+ * copy stays vague about when and specific about what happens next.
+ */
+export const ESCALATION_ACK_BODY = `Thanks for getting in touch.
+
+Someone from the team is looking at this and will reply to you directly. There's
+nothing you need to do in the meantime, and there's no need to send this again —
+your message is with us.
+
+The Mailroom team`;
+
+/**
+ * Acknowledges an escalated message.
+ *
+ * Goes through `sendReply` rather than posting to Resend separately, so it
+ * inherits the threading headers and — more importantly — the same
+ * Message-ID-keyed `Idempotency-Key`. A run that sends the acknowledgment and
+ * then fails before recording it is retried, and Resend returns the original
+ * send instead of delivering a second copy.
+ */
+export async function sendEscalationAck(
+  email: Omit<OutboundEmail, "body">,
+): Promise<void> {
+  await sendReply({ ...email, body: ESCALATION_ACK_BODY });
+}
+
 export async function notifySlack(text: string): Promise<void> {
   const payload = slackNotificationSchema.parse({
     text,
