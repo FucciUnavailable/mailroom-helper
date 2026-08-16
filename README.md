@@ -127,6 +127,30 @@ right. An auto-reply confirms a live, human-monitored address and gets you added
 to more lists. Spam is classified, logged, and dropped. Deciding when _not_ to
 act is most of the work in an autonomous email agent.
 
+**Escalation is not silence, but blocking is.** "No AI reply" and "no email at
+all" turned out to be different things, and collapsing them was a real gap: a
+customer asking about their own invoice from an address we cannot authenticate
+got nothing back, which is the worst experience the system produced. ESCALATE
+now sends a short fixed acknowledgment — a colleague has this, they will reply
+directly.
+
+The safety of that rests on it being a **constant**, `ESCALATION_ACK_BODY` in
+`src/lib/notify.ts`, not a generated draft. No model runs on an escalated
+message, so there is nothing in the text that can invent an account status. It
+also names no reason: `unverified_sender_requesting_account_data` is the rule
+that fires most often here, and "we could not verify you" tells a spoofer
+exactly what to forge next.
+
+BLOCK stays silent, and `acknowledge` is therefore a property of each **rule**
+rather than of the tier — the tiers do not split cleanly on it. Two cases drive
+that. Acknowledging an `automated_sender` means our acknowledgment trips their
+auto-reply, we classify that reply, and if BLOCK acknowledged we would answer it
+again — the unbounded loop the header guards exist to prevent. And
+`reply_cap_exceeded` is an ESCALATE rule that must *not* acknowledge, because
+the rule fires precisely when we have already sent this thread five emails in
+24 hours; the acknowledgment would be the sixth. The suite pins both, and the
+acknowledgment is sent at most once per thread — `threads.status` is the guard.
+
 **Approval is a waitpoint, not a status column.** `wait.forToken({ timeout:
 "1d" })` pauses the run with no idle cost and resumes it when the approve link
 is hit. The alternative is a `pending` row plus a polling cron, which is more
@@ -162,7 +186,7 @@ started as pgvector with all-MiniLM-L6-v2 embedded locally, which was lovely
 until it had to run in a deployed container: ~90MB of model weights pulled at
 every cold start, `onnxruntime-node` externalised out of the bundle because
 esbuild has no loader for prebuilt `.node` binaries, against a 120-second run
-ceiling. For eight knowledge base chunks, that is a lot of machinery bought
+ceiling. For nineteen knowledge base chunks, that is a lot of machinery bought
 with the first impression of a live demo.
 
 So `search_kb_chunks` is `ts_rank` over a generated `tsvector` column. The
@@ -254,6 +278,21 @@ every variable from `.env.example` in the Trigger.dev dashboard for the prod
 environment, or the task fails at boot on the first message, which is by design
 (`src/env.ts` parses at import time).
 
+**`docs/deploy-checklist.md` is the full version of that paragraph**, in order,
+with a way to verify each step. It leads with the two failures that cost the
+most time: an unverified `RESEND_FROM`, which makes every reply to anyone but
+your own account vanish with a 200 and no error, and a Resend webhook
+subscribed to outbound events, which makes the agent ingest its own replies.
+
+### Handing it to someone else
+
+`templates/` holds a reviewer-facing note and five copy-paste test emails, one
+per path through `risk-tier.ts`, each stating the rule it should trigger and
+how to confirm it did. Three of the five produce no email on purpose — the
+handoff note leads with that, because a reviewer who doesn't know it reads
+BLOCK and ESCALATE as a broken agent rather than as the argument the project is
+making.
+
 ### What a green checkmark does and doesn't tell you
 
 CI runs `tsc --noEmit`, `eslint`, and the risk-tier suite. That is a real
@@ -270,10 +309,23 @@ either shape, and a missing auth header fails safe toward escalation — but
 
 One number is unverified in the same way: the `RANK_FLOOR` in
 `src/tools/kb-search.ts` was reasoned about from how `ts_rank` scales with
-matched lexemes, not measured against a live database. Check that
-`general-question` retrieves the pricing and SSO chunks and that an
-out-of-scope question (on-prem deployment, HIPAA) retrieves nothing, and adjust
-the one constant if not.
+matched lexemes, not measured against a live database.
+
+`supabase/diagnostics/rank-check.sql` measures it. It runs a labelled probe set
+through the real `search_kb_chunks` with the floor forced to zero — twenty
+questions the knowledge base should answer, four it must not — and prints both
+a pass/fail per probe and the range of floors that separates the two groups. If
+that range is empty, the fix is the knowledge base rather than the threshold,
+and the output says which probe and which source.
+
+The floor cuts both ways, and it took a live run to see how. Requiring two
+matched lexemes means a short question — "what does it cost?" — finds nothing
+in a chunk that says "custom-priced" and never says "cost", so a perfectly
+ordinary pricing question came back ungrounded and was held for approval. That
+was the floor working correctly on a corpus written in the wrong vocabulary.
+The seed now covers pricing, trials, cancellation, the API, uptime, GDPR and
+limits in the words people actually ask in, and on-premise deployment and HIPAA
+stay held out on purpose so `ungrounded_answer` remains demonstrable.
 
 ## Layout
 
@@ -295,7 +347,10 @@ src/
 make/README.md               the five Make modules, spec'd
 supabase/migrations/         schema + search_kb_chunks
 supabase/seed.sql            synthetic contacts and KB text
+supabase/diagnostics/        rank-check — measures the grounding floor
 scripts/                     send-sample, fixtures
+templates/                   CTO handoff note + five test emails, one per tier
+docs/deploy-checklist.md     dev → production, in order
 ```
 
 ## What I'd do next

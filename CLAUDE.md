@@ -13,21 +13,44 @@ This is a portfolio build with a hard deadline. It is sent to a CTO for
 evaluation, not deployed to production. Optimize for **legibility and
 demonstrated judgment**, not completeness.
 
-## Current state (as of 2026-08-15)
+## Current state (as of 2026-08-16)
 
-The TypeScript side is built and green: `pnpm typecheck`, `pnpm lint`, and
-`pnpm test` (46 cases) all pass. What has **not** been run is anything that
-touches a live service — no migration applied, no task triggered, no email
-sent. Treat "compiles and unit-tests pass" and "works end to end" as different
-claims until the live checklist in the README has been run.
+The TypeScript side is green: `pnpm typecheck`, `pnpm lint`, and `pnpm test`
+(46 cases) all pass.
 
-Three things are reasoned about rather than measured, and the first live run is
-what settles them:
+**It has now run end to end against live mail**, in the Trigger.dev **dev**
+environment with `pnpm dev` open. A real email to the Resend receiving address
+produced an auto-sent reply on one message, and on another produced a Slack
+approval card that, once approved, sent the reply. So the full chain — Resend
+inbound → Make scenario A → `resend-inbound` → `inbound-email` → classify →
+agent loop → risk tier → Resend outbound, plus the waitpoint and Make scenario
+C — is verified working, not just compiling. Make scenario A exists as a
+result, but has **not** been exported and scrubbed into `make/blueprints/`,
+which still holds scenario C only.
 
-- `RANK_FLOOR` in `src/tools/kb-search.ts`.
-- Whether Resend's `GET /emails/receiving/{id}` response includes
-  `Authentication-Results` in `headers`. If it does not, Resend runs its own
-  inbound SPF/DKIM checks and those map onto the payload's optional
+What that run has **not** established: nothing has been deployed. Production
+runs, a `tr_prod_…` key in Make, and the prod environment variables are all
+still to do — see `docs/deploy-checklist.md`.
+
+What that run **did** establish, and which changed the code: the first live
+question was held for approval under `ungrounded_answer`. The cause was
+retrieval, not policy. `RANK_FLOOR = 0.08` requires a chunk to match two or
+more distinct query lexemes, and an eight-chunk knowledge base written in spec
+vocabulary could not clear that for a short question like "what does it cost".
+The seed is now nineteen chunks written in customer vocabulary, and
+`supabase/diagnostics/rank-check.sql` measures the floor against a labelled
+probe set instead of reasoning about it. **On-premise/self-hosted deployment
+and HIPAA/BAA are held out of the seed deliberately** — they are the only live
+demonstration of `ungrounded_answer`, and adding chunks that mention them, even
+to say no, destroys it.
+
+Two things remain reasoned about rather than measured, both in Resend's
+`GET /emails/receiving/{id}` response:
+
+- Whether it includes `Authentication-Results` in `headers`. The
+  `handed off to inbound-email` log line carries `hasAuthenticationResults`, so
+  the next production run settles it by inspection. If it does not, Resend runs
+  its own inbound SPF/DKIM checks and those map onto the payload's optional
   `spfPass`/`dkimPass` booleans — a change to `authenticationResults` in
   `src/trigger/resend-inbound.ts` and nowhere else. Absent both, the parser
   reads the sender as unauthenticated, which is the correct direction to fail.
@@ -35,9 +58,19 @@ what settles them:
   accepts both an array of `{name, value}` and a map, so either works, but only
   one is real.
 
-`make/blueprints/` holds scenario C only. Scenario A is now exportable — the
-relay carries no mailbox connection — but has not been built and exported yet.
-See `make/README.md`.
+## Handoff material
+
+`templates/` is reviewer-facing: a CTO handoff note plus five copy-paste test
+emails, one per path through `risk-tier.ts`. Keep it accurate when risk rules
+change — each template names the rule id it should trigger, so a rename that
+skips these files leaves instructions that quietly stop matching reality.
+
+Three of the five templates produce no email on purpose. That is the first
+thing the handoff note says, because BLOCK and ESCALATE read as a broken agent
+to anyone who has not been told.
+
+`docs/deploy-checklist.md` is dev → production, in order, with verification at
+each step.
 
 ## Commands
 
@@ -152,10 +185,11 @@ Trigger.dev task: inbound-email  (all real logic, TypeScript)
   3. classify (LLM, structured output, zod-validated)
   4. agent loop with tools (AI SDK)
   5. compute risk tier (pure function, src/lib/risk-tier.ts)
-  6. BLOCK    -> log only, no reply
+  6. BLOCK    -> log only, no email of any kind
      AUTO     -> send via Resend
      APPROVE  -> wait.forToken(), on approve send via Resend
-     ESCALATE -> notify human, no AI reply
+     ESCALATE -> notify human, no AI reply; send the sender a fixed
+                 acknowledgment if the rule opted in (once per thread)
 
 Make scenario C (approval relay, ~3 modules)
   GET from a Slack link -> POST the token callback -> confirmation page
@@ -208,7 +242,7 @@ callback URL.
 - One genuine retrieval tool over a small seeded knowledge base in Supabase.
   **This is Postgres full-text search, not pgvector.** The vector path cost a
   ~90MB model download on every deployed cold start against a 120s ceiling,
-  which is not a trade worth making for eight chunks. What was kept is the
+  which is not a trade worth making for nineteen chunks. What was kept is the
   grounding floor: no rows above it means `hasGroundingEvidence: false` and the
   reply is gated rather than invented. `src/tools/kb-search.ts` is the whole
   seam — restoring pgvector is one function and no caller changes.
@@ -273,6 +307,27 @@ Invariants the test suite enforces, worth knowing before editing the rule array:
 - Adding a rule means adding its case plus a precedence case. Every decision
   returns a `reason` equal to the rule `id`, and that string is logged verbatim
   as the audit trail.
+- Each rule also carries an optional `acknowledge`, surfaced on `RiskDecision`,
+  which decides whether the *sender* gets a short fixed note saying a human has
+  it. Defaulting to `false` is deliberate: a new rule stays silent until someone
+  reasons about it. Three invariants the suite pins, all of which look like
+  inconsistencies until you know why:
+  - **No BLOCK rule may ever acknowledge.** Acknowledging an `automated_sender`
+    means our note trips their auto-reply, which we then classify and answer
+    again — the unbounded loop. Acknowledging `abuse` confirms a monitored
+    human reads the inbox.
+  - **`reply_cap_exceeded` must not acknowledge**, even though it is ESCALATE.
+    It fires because we have already sent five emails to this thread in 24h;
+    the acknowledgment would be the sixth.
+  - The copy is `ESCALATION_ACK_BODY` in `src/lib/notify.ts`, a constant, and
+    must stay one. No model runs on an escalated message, so a generated
+    acknowledgment would reintroduce exactly the fabrication risk that
+    escalating was meant to avoid. It also states no reason — naming the failed
+    check tells a spoofer what to forge.
+
+  The once-per-thread guard lives in `finishWithoutReply` and reads
+  `thread.status`, which is why `resolveThread` returns the status as it was
+  *before* this message.
 
 ## Definition of done
 
