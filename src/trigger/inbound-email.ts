@@ -2,6 +2,7 @@ import { logger, schemaTask, wait } from "@trigger.dev/sdk";
 import { z } from "zod";
 import { classify } from "../agent/classify";
 import { draftReply, type ReplyResult } from "../agent/reply";
+import { resolveAuthentication } from "../lib/auth-results";
 import {
   advanceThread,
   countRepliesLast24h,
@@ -91,10 +92,12 @@ export const inboundEmail = schemaTask({
     // ---- 3. Classify ---------------------------------------------------
     const classification = await classify(payload);
 
+    const auth = resolveAuthentication(payload);
+
     const baseRiskInput = {
       classification,
       isAutomatedSender: isAutomatedSender(payload),
-      senderAuthenticated: payload.spfPass && payload.dkimPass,
+      senderAuthenticated: auth.spfPass && auth.dkimPass,
       contactResolved: contact !== null,
       threadTurnCount: thread.turnCount,
       repliesLast24h,

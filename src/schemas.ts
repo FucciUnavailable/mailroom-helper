@@ -52,9 +52,19 @@ export const inboundEmailPayloadSchema = z.object({
 
   headers: loopGuardHeadersSchema.default({}),
 
-  /** SPF and DKIM verdicts from the receiving mail server. */
-  spfPass: z.boolean(),
-  dkimPass: z.boolean(),
+  /**
+   * SPF and DKIM verdicts from the receiving mail server.
+   *
+   * Optional because Make cannot produce them: no mailbox module exposes a
+   * boolean, only the raw `Authentication-Results` header below. Send either.
+   * Absent both, `resolveAuthentication` reads the sender as unauthenticated —
+   * see src/lib/auth-results.ts for why that direction is not negotiable.
+   */
+  spfPass: z.boolean().optional(),
+  dkimPass: z.boolean().optional(),
+
+  /** Raw `Authentication-Results` header, parsed into the two verdicts above. */
+  authenticationResults: z.string().optional(),
 
   receivedAt: z.iso.datetime(),
 });
