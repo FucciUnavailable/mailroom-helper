@@ -13,7 +13,7 @@ This is a portfolio build with a hard deadline. It is sent to a CTO for
 evaluation, not deployed to production. Optimize for **legibility and
 demonstrated judgment**, not completeness.
 
-## Current state (as of 2026-08-14)
+## Current state (as of 2026-08-15)
 
 The TypeScript side is built and green: `pnpm typecheck`, `pnpm lint`, and
 `pnpm test` (46 cases) all pass. What has **not** been run is anything that
@@ -21,12 +21,23 @@ touches a live service — no migration applied, no task triggered, no email
 sent. Treat "compiles and unit-tests pass" and "works end to end" as different
 claims until the live checklist in the README has been run.
 
-Two values in particular are reasoned about rather than measured, and the first
-live run is what settles them: `RANK_FLOOR` in `src/tools/kb-search.ts`, and
-whether the mailbox module in Make scenario A actually surfaces
-`Authentication-Results` where the mapping panel can reach it.
+Three things are reasoned about rather than measured, and the first live run is
+what settles them:
 
-`make/blueprints/` holds scenario C only. See `make/README.md`.
+- `RANK_FLOOR` in `src/tools/kb-search.ts`.
+- Whether Resend's `GET /emails/receiving/{id}` response includes
+  `Authentication-Results` in `headers`. If it does not, Resend runs its own
+  inbound SPF/DKIM checks and those map onto the payload's optional
+  `spfPass`/`dkimPass` booleans — a change to `authenticationResults` in
+  `src/trigger/resend-inbound.ts` and nowhere else. Absent both, the parser
+  reads the sender as unauthenticated, which is the correct direction to fail.
+- Which shape that response's `headers` uses. `resendReceivedEmailSchema`
+  accepts both an array of `{name, value}` and a map, so either works, but only
+  one is real.
+
+`make/blueprints/` holds scenario C only. Scenario A is now exportable — the
+relay carries no mailbox connection — but has not been built and exported yet.
+See `make/README.md`.
 
 ## Commands
 
@@ -40,7 +51,7 @@ cp .env.example .env                   # fill in every value
 # setup while looking like all of it.
 
 pnpm dev                               # trigger.dev dev (tasks run on your machine)
-pnpm deploy                            # trigger deploy — needed for a mailbox-driven
+pnpm deploy                            # trigger deploy — needed for a webhook-driven
                                        # demo; a dev run cannot survive the terminal
 
 pnpm typecheck                         # tsc --noEmit
@@ -93,7 +104,8 @@ restoring `effort` and the model id together — one edit, one file.
 | --- | --- |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | all table access; RLS is on with no policies, so the service role is the only way in |
 | `ANTHROPIC_API_KEY` | classify + reply agent |
-| `RESEND_API_KEY`, `RESEND_FROM` | outbound send in `src/lib/notify.ts` |
+| `RESEND_API_KEY` | outbound send in `src/lib/notify.ts`, and the inbound retrieve in `src/trigger/resend-inbound.ts` — one key, both directions |
+| `RESEND_FROM` | outbound send in `src/lib/notify.ts` |
 | `APPROVAL_RELAY_BASE_URL` | Make scenario C, the GET→POST approval relay |
 | `SLACK_WEBHOOK_URL` | approval requests and escalation notices |
 | `TRIGGER_SECRET_KEY`, `TRIGGER_PROJECT_REF` | CLI, `trigger.config.ts`, `pnpm sample` |
@@ -123,8 +135,15 @@ boot rather than halfway through handling a customer email.
 ## Architecture
 
 ```
-Make scenario A (inbound, ~5 modules)
-  Watch emails -> loop-guard filter -> HTTP POST to Trigger.dev -> done
+Make scenario A (inbound relay, 2 modules)
+  Custom webhook (Resend email.received) -> HTTP POST to Trigger.dev -> done
+  No parsing. Forwards emailId, messageId, receivedAt and nothing else.
+
+Trigger.dev task: resend-inbound  (the ingestion adapter, TypeScript)
+  idempotencyKey = Resend email_id, set by Make
+  1. GET /emails/receiving/{emailId}  (the webhook is metadata only)
+  2. normalise into inboundEmailPayloadSchema (src/lib/inbound-normalize.ts)
+  3. inboundEmail.trigger(payload, { idempotencyKey: <Message-ID>, global })
 
 Trigger.dev task: inbound-email  (all real logic, TypeScript)
   idempotencyKey = RFC 5322 Message-ID
@@ -144,16 +163,34 @@ Make scenario C (approval relay, ~3 modules)
 
 ### Why the split
 
-Make owns the connectors that are genuinely tedious to hand-roll: mailbox auth,
-OAuth, polling a shared inbox. Trigger.dev owns anything with branching,
-retries, or state because that is where Make becomes unmaintainable. This split
-is the central argument of the project and the README must lead with it.
+Make owns the HTTP plumbing that the rest of the stack cannot do for itself.
+Trigger.dev owns anything with branching, retries, or state, because that is
+where Make becomes unmaintainable. This split is the central argument of the
+project and the README must lead with it.
+
+Both scenarios now exist for the same narrow reason: **an HTTP shape mismatch
+Trigger.dev cannot bridge.** Scenario A exists because Trigger.dev v4 has no
+incoming-webhook trigger, so Resend's POST has to be converted into a task
+trigger. Scenario C exists because a Slack hyperlink is a GET and completing a
+waitpoint is a POST. Neither scenario parses anything. If either grows a third
+module that makes a decision, the decision belongs in a task.
 
 The split is per-connector, not per-direction. **Sending is not in Make** — it
 is a direct Resend call in `src/lib/notify.ts`, because one authenticated POST
 does not need a connector platform, and routing it through a webhook would add
 a hop, an untyped payload, and a scenario to maintain. Do not reintroduce an
 outbound scenario.
+
+**Ingestion is not in Make either, beyond the relay.** The Resend webhook is
+metadata only, so the body, headers, thread key and SPF/DKIM verdicts all come
+from a second authenticated GET, and normalising that response is real logic:
+`src/lib/inbound-normalize.ts` plus `src/trigger/resend-inbound.ts`. Do not move
+any of it back into a mapping panel.
+
+`inbound-email` must stay a pure function of a validated
+`inboundEmailPayloadSchema`. That is what lets `pnpm sample` drive the whole
+system from a fixture with no mail provider in the loop, and it is the demo
+path. Ingestion changes go in `resend-inbound`, never in `inbound-email`.
 
 ### Why waitpoints for approval
 
