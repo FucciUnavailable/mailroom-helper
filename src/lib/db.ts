@@ -108,8 +108,9 @@ export async function recordOutboundMessage(
 ): Promise<void> {
   const { error } = await supabase.from("messages").insert({
     thread_id: threadId,
-    // Synthetic Message-ID: the real one is minted by the sending mail server
-    // in Make, which we never see. Unique so the constraint still holds.
+    // Synthetic Message-ID: the real one is minted by Resend's sending
+    // infrastructure and is not in the send response, so we never see it.
+    // Unique so the constraint still holds.
     message_id: `<outbound-${crypto.randomUUID()}@mailroom.invalid>`,
     direction: "outbound",
     subject,

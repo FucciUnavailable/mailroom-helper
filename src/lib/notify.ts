@@ -1,4 +1,5 @@
 import { logger } from "@trigger.dev/sdk";
+import { z } from "zod";
 import { env } from "../env";
 import {
   outboundEmailSchema,
@@ -7,31 +8,85 @@ import {
 } from "../schemas";
 
 /**
- * The two outbound I/O calls: send an email via Make scenario B, and tell a
- * human via Slack. Both validate their payload before it leaves the process.
+ * The two outbound I/O calls: send an email via Resend, and tell a human via
+ * Slack. Both validate their payload before it leaves the process.
+ *
+ * Sending does not go through Make. Mailbox ingestion does, because OAuth
+ * against a shared inbox is genuinely tedious plumbing — but sending is one
+ * authenticated POST, and routing it through a webhook would buy an extra
+ * network hop, an untyped payload, and a scenario to maintain. The asymmetry
+ * is the point: Make where connectors are hard, TypeScript where they are not.
  */
 
-async function postJson(url: string, body: unknown, label: string) {
+const RESEND_ENDPOINT = "https://api.resend.com/emails";
+
+/** Resend answers a successful send with the id it filed the message under. */
+const resendResponseSchema = z.object({ id: z.string().min(1) });
+
+async function postJson(
+  url: string,
+  body: unknown,
+  label: string,
+  headers: Record<string, string> = {},
+): Promise<string> {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 
+  const text = await response.text().catch(() => "<unreadable>");
+
   if (!response.ok) {
-    const text = await response.text().catch(() => "<unreadable>");
     throw new Error(`${label} failed: ${response.status} ${text.slice(0, 200)}`);
   }
+
+  return text;
 }
 
-/** POSTs to Make scenario B, which sends the email and logs CRM activity. */
+/**
+ * Sends the reply through Resend.
+ *
+ * In-Reply-To and References are both set to the inbound Message-ID. One
+ * ancestor is a degenerate References chain, but it is enough for every major
+ * client to file the reply under the original conversation, and it is what
+ * keeps a reply from arriving as a detached new thread.
+ */
 export async function sendReply(email: OutboundEmail): Promise<void> {
   const payload = outboundEmailSchema.parse(email);
 
-  await postJson(env.MAKE_OUTBOUND_WEBHOOK_URL, payload, "sendReply");
+  const raw = await postJson(
+    RESEND_ENDPOINT,
+    {
+      from: env.RESEND_FROM,
+      to: [payload.to],
+      subject: payload.subject,
+      text: payload.body,
+      headers: {
+        "In-Reply-To": payload.inReplyTo,
+        References: payload.inReplyTo,
+      },
+    },
+    "sendReply",
+    {
+      authorization: `Bearer ${env.RESEND_API_KEY}`,
+      // Third idempotency layer, and the only one that covers this specific
+      // window: a send that succeeds at Resend but fails before we record it
+      // is retried by Trigger.dev, and the outbound row is keyed on a fresh
+      // UUID so nothing downstream would catch the duplicate. The inbound
+      // Message-ID is stable across every attempt of this run, so Resend
+      // returns the original send instead of delivering twice.
+      "Idempotency-Key": payload.inReplyTo,
+    },
+  );
 
-  logger.info("reply dispatched to Make", {
+  // A 200 whose body we cannot read is not a send we can claim happened, so
+  // this parse throws rather than shrugging and logging a success.
+  const { id } = resendResponseSchema.parse(JSON.parse(raw));
+
+  logger.info("reply sent", {
     to: payload.to,
+    resendId: id,
     riskReason: payload.riskReason,
   });
 }

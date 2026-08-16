@@ -137,20 +137,13 @@ export const inboundEmail = schemaTask({
     // ---- 7. Branch -----------------------------------------------------
     switch (decision.tier) {
       case RiskTier.AUTO:
-        await dispatch(
-          payload,
-          contact?.email ?? null,
-          draft,
-          decision,
-          thread.id,
-        );
+        await dispatch(payload, draft, decision, thread.id);
         await advanceThread(thread.id, "open", true, thread.turnCount);
         return { outcome: "sent" as const, reason: decision.reason };
 
       case RiskTier.APPROVE:
         return waitForApproval(
           payload,
-          contact?.email ?? null,
           draft,
           decision,
           thread.id,
@@ -217,7 +210,6 @@ async function finishWithoutReply(
  */
 async function dispatch(
   payload: InboundEmailPayload,
-  contactEmail: string | null,
   draft: ReplyResult,
   decision: RiskDecision,
   threadId: string,
@@ -230,7 +222,6 @@ async function dispatch(
     to: payload.from.email,
     subject,
     body: draft.body,
-    contactEmail,
     riskReason: decision.reason,
   });
 
@@ -252,7 +243,6 @@ async function dispatch(
  */
 async function waitForApproval(
   payload: InboundEmailPayload,
-  contactEmail: string | null,
   draft: ReplyResult,
   decision: RiskDecision,
   threadId: string,
@@ -328,7 +318,7 @@ async function waitForApproval(
     return { outcome: "rejected" as const, reason: decision.reason };
   }
 
-  await dispatch(payload, contactEmail, draft, decision, threadId);
+  await dispatch(payload, draft, decision, threadId);
   await advanceThread(threadId, "open", true, turnCount);
 
   return { outcome: "sent_after_approval" as const, reason: decision.reason };
