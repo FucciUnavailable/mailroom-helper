@@ -75,6 +75,43 @@ function replySubject(subject: string): string {
   return /^re:/i.test(subject) ? subject : `Re: ${subject || "your message"}`;
 }
 
+/**
+ * How much of the inbound email goes into a Slack card.
+ *
+ * A Slack webhook accepts roughly 40k characters, so this is not a protocol
+ * limit — it is a reading limit. The approver has to judge a draft against the
+ * question that produced it, and a wall of quoted reply history buries that
+ * question below the fold. Anyone who needs the rest has the thread in the
+ * inbox and the run in the Trigger.dev timeline.
+ */
+const SLACK_QUOTE_LIMIT = 1200;
+
+/**
+ * The sender's own words, fenced for Slack.
+ *
+ * Without this the approver sees a reply with nothing to check it against, and
+ * approving is a formality rather than a decision. The body is untrusted text
+ * from an unauthenticated stranger, so it gets two defences: triple backticks
+ * are neutralised, since one in an email body would otherwise close the fence
+ * early and let the rest of the message render as Slack markup — including the
+ * `<url|label>` link syntax the approve and reject links use. And it goes last
+ * in the card, below those links, so a long quote can never push them off.
+ */
+function quoteInbound(text: string): string[] {
+  const cleaned = text.trim().replaceAll("```", "'''");
+  const truncated =
+    cleaned.length > SLACK_QUOTE_LIMIT
+      ? `${cleaned.slice(0, SLACK_QUOTE_LIMIT)}\n… (truncated)`
+      : cleaned;
+
+  return [
+    "*What they wrote:*",
+    "```",
+    truncated || "(empty message body)",
+    "```",
+  ];
+}
+
 export const inboundEmail = schemaTask({
   id: "inbound-email",
   schema: inboundEmailPayloadSchema,
@@ -333,6 +370,8 @@ async function waitForApproval(
       acknowledge
         ? "_The sender has been told a colleague is picking it up._"
         : "_The sender has not been contacted again; they were already told._",
+      "",
+      ...quoteInbound(payload.text),
     ].join("\n"),
   );
 
