@@ -1,6 +1,5 @@
 import { tool } from "ai";
 import { logger } from "@trigger.dev/sdk";
-import { embed } from "../lib/embeddings";
 import { supabase } from "../lib/supabase";
 import {
   kbSearchInputSchema,
@@ -9,39 +8,46 @@ import {
 } from "../schemas";
 
 /**
- * The similarity floor. Below this a chunk is noise, and returning it would
- * let the model build a confident answer out of unrelated text.
+ * The relevance floor. Below this a chunk is noise, and returning it would let
+ * the model build a confident answer out of unrelated text.
  *
- * Tuned against the seeded knowledge base: on-topic questions score well above
- * it, and deliberately out-of-scope ones (on-prem deployment, HIPAA) score
- * below, which is what makes the ungrounded_answer risk rule observable.
+ * ts_rank grows with the number of distinct query lexemes a chunk matches, and
+ * a single-lexeme hit lands near 0.06 — so this sits just above one word in
+ * common. Deliberately out-of-scope questions (on-prem deployment, HIPAA) fall
+ * under it, which is what makes the ungrounded_answer risk rule observable.
+ *
+ * The same number is the SQL function's default. It is passed explicitly
+ * anyway: the floor is a product decision about when we are willing to answer,
+ * and it belongs somewhere a reviewer reads, not only in a migration.
  */
-const SIMILARITY_FLOOR = 0.35;
+const RANK_FLOOR = 0.08;
 const MAX_CHUNKS = 4;
 
 interface MatchRow {
   id: string;
   source: string;
   content: string;
-  similarity: number;
+  rank: number;
 }
 
 /**
- * The one real RAG tool: pgvector cosine search over the seeded knowledge base.
+ * Retrieval over the seeded knowledge base: Postgres full-text search, ranked.
  *
  * Returns `grounded: false` with an empty list rather than throwing when
  * nothing clears the floor. That distinction is load-bearing — the task reads
  * it into the risk input, and the model is told to offer a human instead of
  * guessing.
+ *
+ * Lexical, not semantic. At eight chunks that is the right trade, and this
+ * function is the whole seam: restoring pgvector means changing the RPC call
+ * below and nothing else in the codebase.
  */
 export async function searchKnowledgeBase(
   query: string,
 ): Promise<KbSearchOutput> {
-  const queryEmbedding = await embed(query);
-
-  const { data, error } = await supabase.rpc("match_kb_chunks", {
-    query_embedding: JSON.stringify(queryEmbedding),
-    match_threshold: SIMILARITY_FLOOR,
+  const { data, error } = await supabase.rpc("search_kb_chunks", {
+    query_text: query,
+    match_threshold: RANK_FLOOR,
     match_count: MAX_CHUNKS,
   });
 
@@ -60,7 +66,7 @@ export async function searchKnowledgeBase(
     chunks: rows.map((row) => ({
       source: row.source,
       content: row.content,
-      similarity: row.similarity,
+      rank: row.rank,
     })),
     grounded: rows.length > 0,
   });

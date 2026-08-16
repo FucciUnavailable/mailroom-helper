@@ -125,10 +125,11 @@ export const kbSearchOutputSchema = z.object({
     z.object({
       source: z.string(),
       content: z.string(),
-      similarity: z.number(),
+      /** ts_rank score. Ordering signal only — the floor is applied in SQL. */
+      rank: z.number(),
     }),
   ),
-  /** False when nothing cleared the similarity floor. Feeds the risk input. */
+  /** False when nothing cleared the relevance floor. Feeds the risk input. */
   grounded: z.boolean(),
 });
 

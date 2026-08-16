@@ -53,7 +53,7 @@ export const riskInputSchema = z.object({
   repliesLast24h: z.number().int().min(0),
   /** Tools the agent wants to call that mutate external state. */
   proposedWrites: z.array(z.string()),
-  /** At least one knowledge-base chunk cleared the similarity floor. */
+  /** At least one knowledge-base chunk cleared the relevance floor. */
   hasGroundingEvidence: z.boolean(),
 });
 

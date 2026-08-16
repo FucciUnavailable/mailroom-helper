@@ -4,8 +4,8 @@
 -- are RFC 2606 reserved TLDs that can never resolve, so a misconfigured demo
 -- cannot email a real person.
 --
--- kb_chunks ship with text only. Run `pnpm seed:kb` to fill in the embeddings
--- locally — no vector literals are committed.
+-- kb_chunks are searchable the moment they land: content_tsv is a generated
+-- column, so there is no separate indexing or embedding step to remember.
 
 insert into public.contacts (email, full_name, company, lifecycle_stage, notes)
 values
@@ -20,7 +20,7 @@ on conflict (email) do nothing;
 --
 -- Deliberately small and deliberately incomplete: the gaps are what make the
 -- ungrounded_answer risk rule observable in the demo. A question about, say,
--- on-premise deployment finds nothing, clears no similarity floor, and gets
+-- on-premise deployment finds nothing, clears no relevance floor, and gets
 -- routed to a human instead of being invented.
 -- --------------------------------------------------------------------------
 insert into public.kb_chunks (source, content)

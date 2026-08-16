@@ -10,10 +10,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild",
-      "@depot/cli",
-      "onnxruntime-node",
-      "protobufjs",
-      "sharp"
+      "@depot/cli"
     ]
   },
   "scripts": {
@@ -23,13 +20,11 @@
     "test:watch": "vitest",
     "dev": "trigger dev",
     "deploy": "trigger deploy",
-    "seed:kb": "tsx --env-file-if-exists=.env scripts/seed-kb.ts",
     "sample": "tsx --env-file-if-exists=.env scripts/send-sample.ts",
     "approve": "tsx --env-file-if-exists=.env scripts/approve.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.39",
-    "@huggingface/transformers": "^4.2.0",
     "@supabase/supabase-js": "^2.112.3",
     "@trigger.dev/sdk": "^4.5.11",
     "ai": "^7.0.66",
