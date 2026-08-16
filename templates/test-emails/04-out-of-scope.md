@@ -25,11 +25,14 @@ Sam
 | hasGroundingEvidence | `false` |
 | tier | **APPROVE** |
 | rule | `ungrounded_answer` |
-| you receive | **nothing** until a human clicks approve |
+| you receive | a short note saying a colleague is picking it up — **no answer** until a human clicks approve |
 | Slack receives | an approval card with the draft, approve and reject links |
 
-Click **Approve and send** and the reply arrives. Click **Reject** and it never
-does, and Slack says so.
+Click **Approve and send** and the answer arrives as a second email. Click
+**Reject** and it never does, and Slack says so — but you are not left in
+silence, because the note already went out. That is the point of sending it
+before the wait rather than after: reject and the 24 hour timeout are the two
+branches that would otherwise end in a customer never hearing anything.
 
 ## Why this one is reliable
 

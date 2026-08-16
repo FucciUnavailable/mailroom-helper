@@ -15,9 +15,9 @@ import {
 } from "../lib/db";
 import {
   approvalLinks,
-  ESCALATION_ACK_BODY,
+  HOLDING_ACK_BODY,
   notifySlack,
-  sendEscalationAck,
+  sendHoldingAck,
   sendReply,
 } from "../lib/notify";
 import {
@@ -146,13 +146,7 @@ export const inboundEmail = schemaTask({
         return { outcome: "sent" as const, reason: decision.reason };
 
       case RiskTier.APPROVE:
-        return waitForApproval(
-          payload,
-          draft,
-          decision,
-          thread.id,
-          thread.turnCount,
-        );
+        return waitForApproval(payload, draft, decision, thread);
 
       // The pre-agent gate already returned for these, but the switch stays
       // exhaustive: assessRisk is a complete decision on its own, and a future
@@ -209,7 +203,7 @@ async function finishWithoutReply(
   if (acknowledge) {
     const subject = replySubject(payload.subject);
 
-    await sendEscalationAck({
+    await sendHoldingAck({
       threadKey: payload.threadKey,
       inReplyTo: payload.messageId,
       to: payload.from.email,
@@ -224,7 +218,7 @@ async function finishWithoutReply(
       thread.id,
       payload.messageId,
       subject,
-      ESCALATION_ACK_BODY,
+      HOLDING_ACK_BODY,
       decision,
     );
 
@@ -282,14 +276,23 @@ async function dispatch(
  * The run is suspended, not spinning: it consumes no compute while parked, and
  * the timeout is enforced by the platform rather than by a cron sweeping a
  * `pending` table.
+ *
+ * The sender is told a human is looking, before the wait begins. Without it,
+ * every terminal branch below except `approve` ends in permanent silence toward
+ * someone who asked a real question — a rejected draft and a 24 hour timeout
+ * both notify Slack and nothing else. Acknowledging once, up front, covers all
+ * three outcomes rather than bolting a message onto each; the cost is that a
+ * fast approval arrives as a second email a few minutes behind the first, which
+ * is a fair trade against going dark for a day.
  */
 async function waitForApproval(
   payload: InboundEmailPayload,
   draft: ReplyResult,
   decision: RiskDecision,
-  threadId: string,
-  turnCount: number,
+  thread: ThreadState,
 ) {
+  const { id: threadId, turnCount } = thread;
+
   const token = await wait.createToken({
     timeout: "1d",
     tags: [`thread:${payload.threadKey}`],
@@ -305,6 +308,14 @@ async function waitForApproval(
     rule: decision.reason,
   });
 
+  // Once per thread, on the same rule as the escalation acknowledgment and for
+  // the same reason: `status` is the thread as it was before this message, so a
+  // sender who has already been told a human is involved — whether by an
+  // escalation or by an earlier draft still sitting in the queue — is not told
+  // again on every follow-up.
+  const acknowledge =
+    thread.status !== "awaiting_approval" && thread.status !== "escalated";
+
   await notifySlack(
     [
       `:eyes: *Approval needed*`,
@@ -319,8 +330,36 @@ async function waitForApproval(
       "",
       `<${links.approve}|Approve and send>  ·  <${links.reject}|Reject>`,
       "_Expires in 24 hours._",
+      acknowledge
+        ? "_The sender has been told a colleague is picking it up._"
+        : "_The sender has not been contacted again; they were already told._",
     ].join("\n"),
   );
+
+  if (acknowledge) {
+    await sendHoldingAck({
+      threadKey: payload.threadKey,
+      inReplyTo: payload.messageId,
+      to: payload.from.email,
+      subject: replySubject(payload.subject),
+      riskReason: decision.reason,
+    });
+
+    // Counted like any other outbound message, so the acknowledgment is visible
+    // to countRepliesLast24h. A send the reply cap cannot see is a hole in it.
+    await recordOutboundMessage(
+      threadId,
+      payload.messageId,
+      replySubject(payload.subject),
+      HOLDING_ACK_BODY,
+      decision,
+    );
+
+    logger.info("acknowledged pending approval to sender", {
+      reason: decision.reason,
+      to: payload.from.email,
+    });
+  }
 
   await advanceThread(threadId, "awaiting_approval", false, turnCount);
 
@@ -328,7 +367,12 @@ async function waitForApproval(
 
   if (!result.ok) {
     await notifySlack(
-      `:hourglass: Approval timed out for *${payload.subject}* from ${payload.from.email}. No reply was sent.`,
+      [
+        `:hourglass: Approval timed out for *${payload.subject}* from ${payload.from.email}. The draft was never sent.`,
+        acknowledge
+          ? "The sender was told a colleague is picking it up, so they are waiting on a human reply. This thread needs one."
+          : "The sender had already been acknowledged earlier in this thread.",
+      ].join(" "),
     );
     await advanceThread(threadId, "escalated", false, turnCount);
     return { outcome: "approval_timeout" as const, reason: decision.reason };
@@ -354,7 +398,12 @@ async function waitForApproval(
 
   if (parsed.data.decision === "reject") {
     await notifySlack(
-      `:x: Draft rejected for *${payload.subject}*. Nothing was sent.`,
+      [
+        `:x: Draft rejected for *${payload.subject}*. The draft was not sent.`,
+        acknowledge
+          ? "The sender was told a colleague is picking it up, so they are expecting a human reply."
+          : "The sender had already been acknowledged earlier in this thread.",
+      ].join(" "),
     );
     await advanceThread(threadId, "escalated", false, turnCount);
     return { outcome: "rejected" as const, reason: decision.reason };

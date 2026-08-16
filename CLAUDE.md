@@ -81,9 +81,11 @@ emails, one per path through `risk-tier.ts`. Keep it accurate when risk rules
 change — each template names the rule id it should trigger, so a rename that
 skips these files leaves instructions that quietly stop matching reality.
 
-Three of the five templates produce no email on purpose. That is the first
-thing the handoff note says, because BLOCK and ESCALATE read as a broken agent
-to anyone who has not been told.
+Three of the five templates never produce an AI-written answer, and one of
+those — spam — produces no email at all. That is the first thing the handoff
+note says, because a reviewer who has not been told reads all three as a broken
+agent. The other two send the fixed holding note instead, so the only true
+silence in the system is BLOCK.
 
 `docs/deploy-checklist.md` is dev → production, in order, with verification at
 each step.
@@ -335,7 +337,7 @@ Invariants the test suite enforces, worth knowing before editing the rule array:
   - **`reply_cap_exceeded` must not acknowledge**, even though it is ESCALATE.
     It fires because we have already sent five emails to this thread in 24h;
     the acknowledgment would be the sixth.
-  - The copy is `ESCALATION_ACK_BODY` in `src/lib/notify.ts`, a constant, and
+  - The copy is `HOLDING_ACK_BODY` in `src/lib/notify.ts`, a constant, and
     must stay one. No model runs on an escalated message, so a generated
     acknowledgment would reintroduce exactly the fabrication risk that
     escalating was meant to avoid. It also states no reason — naming the failed
@@ -344,6 +346,25 @@ Invariants the test suite enforces, worth knowing before editing the rule array:
   The once-per-thread guard lives in `finishWithoutReply` and reads
   `thread.status`, which is why `resolveThread` returns the status as it was
   *before* this message.
+
+**APPROVE acknowledges too, and that is task-level rather than rule-level.**
+`waitForApproval` sends the same `HOLDING_ACK_BODY` before parking on the
+waitpoint, guarded on `thread.status` not already being `awaiting_approval` or
+`escalated`. It is not driven by a rule's `acknowledge` flag because it is not a
+property of any one rule: the reason is structural. Of the four ways out of the
+waitpoint, only `approve` sends the customer anything — reject and the 24 hour
+timeout both notify Slack and stop — so without an acknowledgment up front,
+those branches are permanent silence toward someone who asked a real question.
+One acknowledgment when the draft is queued covers all three. The cost is that a
+fast approval arrives as a second email a few minutes later.
+
+**The Resend `Idempotency-Key` is scoped by `OutboundKind`, not by Message-ID
+alone**, and this is what makes the above safe. The acknowledgment and the
+approved reply answer the same inbound message. Keyed on the Message-ID alone
+they collide: Resend returns the first send, the customer gets the
+acknowledgment and never the answer, and `sendReply` logs a delivery that did
+not happen. Sends of the same kind must still collide — that is the retry
+protection the key exists for.
 
 ## Definition of done
 

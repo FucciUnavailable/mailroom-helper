@@ -127,19 +127,37 @@ right. An auto-reply confirms a live, human-monitored address and gets you added
 to more lists. Spam is classified, logged, and dropped. Deciding when _not_ to
 act is most of the work in an autonomous email agent.
 
-**Escalation is not silence, but blocking is.** "No AI reply" and "no email at
-all" turned out to be different things, and collapsing them was a real gap: a
-customer asking about their own invoice from an address we cannot authenticate
-got nothing back, which is the worst experience the system produced. ESCALATE
-now sends a short fixed acknowledgment — a colleague has this, they will reply
-directly.
+**Waiting on a human is not silence, but blocking is.** "No AI reply" and "no
+email at all" turned out to be different things, and collapsing them was a real
+gap: a customer asking about their own invoice from an address we cannot
+authenticate got nothing back, which is the worst experience the system
+produced. ESCALATE now sends a short fixed acknowledgment — a colleague has
+this, they will reply directly.
 
-The safety of that rests on it being a **constant**, `ESCALATION_ACK_BODY` in
-`src/lib/notify.ts`, not a generated draft. No model runs on an escalated
-message, so there is nothing in the text that can invent an account status. It
-also names no reason: `unverified_sender_requesting_account_data` is the rule
-that fires most often here, and "we could not verify you" tells a spoofer
-exactly what to forge next.
+APPROVE does the same, before it parks on the waitpoint, and that closes a
+second version of the same hole. A draft that is rejected, or that sits
+unapproved for 24 hours, notifies Slack and nothing else — so without an
+up-front acknowledgment those two branches end in permanent silence toward
+someone who asked a real question. Acknowledging once, when the draft is queued,
+covers approve, reject and timeout together. A fast approval means the sender
+gets two emails a few minutes apart, which is the cost of not going dark for a
+day.
+
+The safety of that rests on it being a **constant**, `HOLDING_ACK_BODY` in
+`src/lib/notify.ts`, not a generated draft. On the escalation path no model runs
+at all, so there is nothing in the text that can invent an account status; on
+the approval path a draft exists but is exactly the thing nobody has signed off
+yet, so none of it goes out early. It also names no reason:
+`unverified_sender_requesting_account_data` is the rule that fires most often
+here, and "we could not verify you" tells a spoofer exactly what to forge next.
+
+One subtlety worth knowing before touching the send path: the Resend
+`Idempotency-Key` is scoped by *kind* (`OutboundKind` in `src/lib/notify.ts`),
+not by the inbound Message-ID alone. Both the acknowledgment and the approved
+reply answer the same inbound message, so an unscoped key makes the second send
+collide with the first — Resend returns the original, the customer receives the
+acknowledgment and never the answer, and the log records a reply that was never
+delivered.
 
 BLOCK stays silent, and `acknowledge` is therefore a property of each **rule**
 rather than of the tier — the tiers do not split cleanly on it. Two cases drive

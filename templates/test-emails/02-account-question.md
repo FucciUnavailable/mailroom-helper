@@ -81,7 +81,7 @@ Then resend:
 | tier | **APPROVE** |
 | rule | `account_data_disclosure` |
 | Slack receives | an approval card with the draft, plus approve and reject links |
-| you receive | the reply, **after** you click approve |
+| you receive | a short note saying a colleague is picking it up, then the reply itself **after** you click approve |
 
 The agent will have called `crm_lookup` and found you, so the draft reflects
 the `notes` field on your contact row. That is the mocked CRM doing its job —

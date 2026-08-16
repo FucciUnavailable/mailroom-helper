@@ -45,6 +45,23 @@ async function postJson(
 }
 
 /**
+ * Which outbound email this is, within one inbound message.
+ *
+ * Part of the Resend idempotency key, and load-bearing. A single inbound
+ * message can legitimately produce two different sends — the "a human is
+ * looking at this" acknowledgment when a draft is parked for approval, and then
+ * the approved reply itself. Both are keyed on the same inbound Message-ID, so
+ * without this discriminator the second send collides with the first, Resend
+ * returns the original, and the customer receives the acknowledgment and never
+ * the answer while our log records a successful reply. Silent, and the wrong
+ * kind of silent.
+ *
+ * Sends of the *same* kind must keep colliding: that is the retry protection
+ * the key exists for.
+ */
+export type OutboundKind = "reply" | "ack";
+
+/**
  * Sends the reply through Resend.
  *
  * In-Reply-To and References are both set to the inbound Message-ID. One
@@ -52,7 +69,10 @@ async function postJson(
  * client to file the reply under the original conversation, and it is what
  * keeps a reply from arriving as a detached new thread.
  */
-export async function sendReply(email: OutboundEmail): Promise<void> {
+export async function sendReply(
+  email: OutboundEmail,
+  kind: OutboundKind = "reply",
+): Promise<void> {
   const payload = outboundEmailSchema.parse(email);
 
   const raw = await postJson(
@@ -76,7 +96,11 @@ export async function sendReply(email: OutboundEmail): Promise<void> {
       // UUID so nothing downstream would catch the duplicate. The inbound
       // Message-ID is stable across every attempt of this run, so Resend
       // returns the original send instead of delivering twice.
-      "Idempotency-Key": payload.inReplyTo,
+      //
+      // Scoped by kind, because one inbound message can produce both an
+      // acknowledgment and a reply — see OutboundKind for what breaks without
+      // it.
+      "Idempotency-Key": `${payload.inReplyTo}#${kind}`,
     },
   );
 
@@ -92,13 +116,19 @@ export async function sendReply(email: OutboundEmail): Promise<void> {
 }
 
 /**
- * What an escalated sender receives instead of silence.
+ * What a sender receives instead of silence whenever a human enters the loop —
+ * both when a message is escalated with no draft, and when a draft is parked
+ * waiting for approval. One constant covers both because from the sender's side
+ * they are the same event: a person is handling this, and the next email they
+ * get has been read by one.
  *
- * A constant, not a generated draft, and that is the entire safety argument: no
- * model runs on an escalated message, so there is nothing here that can invent
- * an account status, promise a refund, or quote a price. It is the same text
- * every time and it can be read in full, right here, by whoever is deciding
- * whether it is safe to send.
+ * A constant, not a generated draft, and that is the entire safety argument. On
+ * the escalation path no model runs at all, so there is nothing here that can
+ * invent an account status, promise a refund, or quote a price. On the approval
+ * path a draft does exist, but it is precisely the thing nobody has approved
+ * yet — sending any of it early would defeat the gate. It is the same text every
+ * time and it can be read in full, right here, by whoever is deciding whether it
+ * is safe to send.
  *
  * Two things it deliberately does not do. It does not say **why** a human is
  * involved — "we could not verify your identity" tells a spoofer precisely what
@@ -107,7 +137,7 @@ export async function sendReply(email: OutboundEmail): Promise<void> {
  * agreed to; "shortly" is a commitment the support plan may not carry, so the
  * copy stays vague about when and specific about what happens next.
  */
-export const ESCALATION_ACK_BODY = `Thanks for getting in touch.
+export const HOLDING_ACK_BODY = `Thanks for getting in touch.
 
 Someone from the team is looking at this and will reply to you directly. There's
 nothing you need to do in the meantime, and there's no need to send this again —
@@ -116,18 +146,20 @@ your message is with us.
 The Mailroom team`;
 
 /**
- * Acknowledges an escalated message.
+ * Tells the sender a human has their message — on escalation, or while a draft
+ * sits on the approval waitpoint.
  *
  * Goes through `sendReply` rather than posting to Resend separately, so it
- * inherits the threading headers and — more importantly — the same
- * Message-ID-keyed `Idempotency-Key`. A run that sends the acknowledgment and
- * then fails before recording it is retried, and Resend returns the original
- * send instead of delivering a second copy.
+ * inherits the threading headers and the Message-ID-keyed `Idempotency-Key`. A
+ * run that sends the acknowledgment and then fails before recording it is
+ * retried, and Resend returns the original send instead of delivering a second
+ * copy. The `"ack"` kind is what keeps that protection from swallowing the
+ * approved reply later in the same run.
  */
-export async function sendEscalationAck(
+export async function sendHoldingAck(
   email: Omit<OutboundEmail, "body">,
 ): Promise<void> {
-  await sendReply({ ...email, body: ESCALATION_ACK_BODY });
+  await sendReply({ ...email, body: HOLDING_ACK_BODY }, "ack");
 }
 
 export async function notifySlack(text: string): Promise<void> {
